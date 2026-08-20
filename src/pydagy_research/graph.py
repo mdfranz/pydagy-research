@@ -192,12 +192,25 @@ def default_deps(model: Any, *, use_headless_browser: bool = False) -> PipelineD
     see browser_gateway.py), so `.read()` renders JavaScript-heavy pages
     with real Chromium instead of a static HTML fetch.
     """
-    gateway_factory: Callable[[ResearchPlan], RetrievalGateway] = make_gateway
-    if use_headless_browser:
-        from .browser_gateway import BrowserAugmentedGateway
 
-        def gateway_factory(plan: ResearchPlan) -> RetrievalGateway:
-            return BrowserAugmentedGateway(make_gateway(plan))
+    def gateway_factory(plan: ResearchPlan) -> RetrievalGateway:
+        # PydanticNativeSearchGateway wraps a pydantic_ai.Agent and, unlike
+        # AntigravitySDKGateway (which resolves its own model via
+        # LocalAgentConfig/ADC/env when none is given), has no default model
+        # to fall back to -- it needs the same `model` the Planner/Writer
+        # agents use. AntigravitySDKGateway's `model` kwarg is a *different*
+        # namespace (the Antigravity SDK's own model identifiers, not
+        # pydantic_ai's provider-prefixed ones), so it must NOT get `model`
+        # here -- pass nothing and let it resolve its own default.
+        if plan.retrieval_backend == "pydantic_native":
+            gateway = make_gateway(plan, model=model)
+        else:
+            gateway = make_gateway(plan)
+        if use_headless_browser:
+            from .browser_gateway import BrowserAugmentedGateway
+
+            gateway = BrowserAugmentedGateway(gateway)
+        return gateway
 
     return PipelineDeps(
         planner_agent=build_planner_agent(model),

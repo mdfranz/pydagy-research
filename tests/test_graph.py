@@ -13,8 +13,8 @@ import pytest
 from pydantic_ai.models.test import TestModel
 
 from pydagy_research.agents import build_planner_agent, build_writer_agent
-from pydagy_research.gateway import RetrievalGateway
-from pydagy_research.graph import PipelineDeps, PipelineState, build_graph
+from pydagy_research.gateway import AntigravitySDKGateway, PydanticNativeSearchGateway, RetrievalGateway
+from pydagy_research.graph import PipelineDeps, PipelineState, build_graph, default_deps
 from pydagy_research.models import EvidenceRecord, ResearchPlan, SearchOrFetchRequest
 
 
@@ -209,3 +209,28 @@ async def test_validator_node_deduplicates_and_drops_failed_and_drift_records():
     assert next_node.__class__.__name__ == "WriterNode"
     assert list(state.evidence_pool.keys()) == ["EVID-001"]
     assert state.evidence_pool["EVID-001"].source_url == good.source_url
+
+
+def test_default_deps_gateway_factory_threads_model_into_pydantic_native_only():
+    """Regression test: PydanticNativeSearchGateway.model is a required
+
+    positional arg (unlike AntigravitySDKGateway.model, which defaults to
+    None and resolves via LocalAgentConfig/ADC/env) -- a live
+    `--backend pydantic_native` run crashed with `TypeError:
+    PydanticNativeSearchGateway.__init__() missing 1 required positional
+    argument: 'model'` because default_deps()'s gateway_factory never
+    passed it through. Confirms both backends now construct successfully
+    from the same default_deps(model) call, and that AntigravitySDKGateway
+    does NOT receive the pydantic_ai model string (a different namespace
+    from the Antigravity SDK's own model identifiers).
+    """
+    deps = default_deps(TestModel())
+
+    native_plan = ResearchPlan(question="q", retrieval_backend="pydantic_native", requests=[])
+    native_gateway = deps.gateway_factory(native_plan)
+    assert isinstance(native_gateway, PydanticNativeSearchGateway)
+
+    antigravity_plan = ResearchPlan(question="q", retrieval_backend="antigravity", requests=[])
+    antigravity_gateway = deps.gateway_factory(antigravity_plan)
+    assert isinstance(antigravity_gateway, AntigravitySDKGateway)
+    assert antigravity_gateway._model is None
