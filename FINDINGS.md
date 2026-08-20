@@ -270,8 +270,51 @@ default" — PLAN.md §1, §"Assumptions & Boundaries") specifically for the
 large-page/`content_path` case — not enough evidence yet to revise the
 default outright, enough to say the assumption needs the actual Benchmark
 Comparator PLAN.md already calls for (§Test Plan), not anecdotal runs, and
-that the `VIEW_FILE` follow-through gap is a concrete, fixable candidate
-rather than a vague known-limitation footnote.
+that the `VIEW_FILE` gap (§3.1) is a concrete, fixable candidate rather
+than a vague known-limitation footnote.
+
+### 3.1 The real root cause: `view_file`'s hook payload was never the file's content
+
+Tracing the fix for §3's gap turned up something more fundamental than a
+prompt-wording problem. `google.antigravity.event_processor._TOOL_RESULT_MODELS`
+— the mapping the SDK uses to turn a tool's wire result into a structured
+object for the `post_tool_call` hook — does **not** include `VIEW_FILE`.
+Confirmed directly against a live session's raw hook payload:
+
+```json
+{"toolName": "view_file", "result": "View cached LangChain CVE results", "error": ""}
+```
+
+That `result` string is a short caption, not the file's content — regardless
+of prompt wording, the `post_tool_call` hook was structurally incapable of
+ever seeing what `view_file` actually viewed. The real content the model
+saw is only recoverable from the model's own final response text, which is
+exactly the "ungrounded model paraphrase" PLAN.md §2 says must never become
+`raw_extract`.
+
+**Fix (deliberate, narrow exception, commit `adc541a`):**
+`AntigravitySDKGateway._apply_response_text_fallback`
+replaces a thin (`< 80` char) `page_content` extract with the model's final
+response text, but only then — mirroring the same accepted trade-off
+`PydanticNativeSearchGateway` already makes for its own backend (§1's
+"falling back to raw_extract as an opaque blob otherwise"). Verified the
+mechanism directly with unit tests (thin extract gets replaced; a
+rich extract is left alone; a thin response text changes nothing).
+
+**Honest result from re-running the exact failing case (`cve.mitre.org`)
+four times after the fix:** the fallback correctly fired every time — no
+more 21-character non-answers — but what it fell back *to* varied a lot:
+1 of 4 runs recovered 7 real, specific CVEs (matching the earlier
+`PydanticNativeSearchGateway` fallback's content almost exactly); the other
+3 had the model honestly report that the static HTML response contained no
+rendered search results at all. That's not a bug in the fallback — it's the
+fallback correctly reporting an honest "nothing found" instead of masking
+it behind a misleadingly confident caption — but it means the fix upgrades
+"silently wrong" to "correctly uncertain," not "reliably right," for this
+specific URL. `--browser` (§2) remains the actually-reliable fix for
+pages like this one that need real rendering; this fallback is defense in
+depth for the (faster, dependency-free) non-`--browser` path, not a
+replacement for it.
 
 ---
 
@@ -295,13 +338,16 @@ explicable structural difference in turn count.
 
 ## 5. Open questions / suggested next steps
 
-- **Fix the `VIEW_FILE` follow-through gap** (§3): strengthen the Antigravity
-  `read()` prompt to explicitly require calling `view_file` on `content_path`
-  whenever the initial `summary`/`title` come back empty or suspiciously
-  short, rather than treating a thin result as done. Candidate fix, not yet
-  implemented — the exact wording needs the same kind of live verification
-  every other prompt fix in this document got, not just a plausible-looking
-  instruction.
+- ~~Fix the `VIEW_FILE` follow-through gap~~ — **done, commit `adc541a` (§3.1)**:
+  turned out to be a structural SDK limitation (`view_file`'s hook payload
+  is never the file's content), not a prompt-wording issue; fixed with a
+  narrow response-text fallback instead. Verified live: no more
+  misleadingly-thin "successes," but content richness on the specific
+  `cve.mitre.org` case is still inconsistent run-to-run (1 of 4 recovered
+  real CVEs; 3 of 4 honestly reported nothing rendered) — `--browser`
+  remains the reliable fix for pages that need real rendering. Worth
+  re-testing on a page that *doesn't* need JS (a large but static page) to
+  see if the fallback is more consistently useful there.
 - **Replace anecdotal comparison with PLAN.md's actual Benchmark
   Comparator** (§Test Plan): citation accuracy/coverage, unsupported-claim
   rate, latency, and token consumption, across enough runs per backend to
