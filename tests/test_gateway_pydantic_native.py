@@ -88,6 +88,48 @@ def test_extract_native_evidence_returns_empty_list_for_empty_output():
     assert _extract_native_evidence(result, source_kind="page_content", fallback_url="u", fallback_title="t") == []
 
 
+def test_extract_native_evidence_falls_back_when_tool_return_is_status_only():
+    """Regression test: a live `--backend pydantic_native` run showed Google's
+
+    web_fetch tool-return content is *only* retrieval status --
+    `{"url_metadata": [{"retrieved_url": ..., "url_retrieval_status":
+    "URL_RETRIEVAL_STATUS_SUCCESS"}]}` -- with no actual page text
+    anywhere in it. Before this fix, that dict's str() became raw_extract,
+    so citations quoted the status dict itself
+    ("{'retrieved_url': ..., 'url_retrieval_status': ...}") instead of any
+    real content. This must fall through to the result.output fallback
+    instead of fabricating a record from status metadata.
+    """
+    result = _FakeResult(
+        output="Here is the content of example.com: Example Domain, a page for illustrative examples.",
+        messages=[
+            _FakeMessage(
+                parts=[
+                    _FakePart(
+                        part_kind="builtin-tool-return",
+                        content={
+                            "url_metadata": [
+                                {
+                                    "retrieved_url": "https://example.com",
+                                    "url_retrieval_status": "URL_RETRIEVAL_STATUS_SUCCESS",
+                                }
+                            ]
+                        },
+                    ),
+                ]
+            )
+        ],
+    )
+
+    records = _extract_native_evidence(
+        result, source_kind="page_content", fallback_url="https://example.com", fallback_title="example.com"
+    )
+
+    assert len(records) == 1
+    assert "url_retrieval_status" not in records[0].raw_extract
+    assert records[0].raw_extract == result.output
+
+
 class _RaisingAgent:
     async def run(self, prompt: str):
         raise UnexpectedModelBehavior("model refused to call the tool")

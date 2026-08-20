@@ -418,13 +418,32 @@ class PydanticNativeSearchGateway:
         )
 
 
+
+# Field names that indicate a `builtin-tool-return` part's `content` dict
+# actually carries fetched/searched text, as opposed to pure retrieval
+# bookkeeping. Confirmed necessary against a live call: Google's `web_fetch`
+# tool-return content is `{"url_metadata": [{"retrieved_url": ..., "
+# url_retrieval_status": "URL_RETRIEVAL_STATUS_SUCCESS"}]}` -- status
+# metadata only, no page text anywhere in it. Treating that dict's `str()`
+# as `raw_extract` (the original bug here) produced citations whose
+# "snippet" was literally that status dict's repr instead of real content.
+# The actual fetched text only shows up in the model's own subsequent
+# TextPart, which is exactly the "ungrounded model prose" PLAN.md §2 says
+# must never become raw_extract -- so when a provider's tool-return has no
+# real content field, the right move is to fall through to the
+# result.output opaque-blob fallback below, not to fabricate a record from
+# metadata that was never meant to be evidence.
+_CONTENT_TEXT_KEYS = ("snippet", "text", "content", "extract", "body", "summary")
+
+
 def _extract_native_evidence(
     result: Any, *, source_kind: str, fallback_url: str, fallback_title: str
 ) -> list[EvidenceRecord]:
     """Best-effort per-source extraction from native tool-call grounding metadata.
 
     Falls back to one opaque `raw_extract` record built from `result.output`
-    when the provider doesn't itemize sources (PLAN.md §1).
+    when the provider doesn't itemize sources, or itemizes only retrieval
+    status with no actual content (PLAN.md §1).
     """
     records: list[EvidenceRecord] = []
     try:
@@ -442,6 +461,8 @@ def _extract_native_evidence(
             title = fallback_title
             url = fallback_url
             if isinstance(content, dict):
+                if not any(key in content for key in _CONTENT_TEXT_KEYS):
+                    continue  # status/metadata only -- fall through to the output-text fallback
                 url = content.get("url") or content.get("source_url") or url
                 title = content.get("title") or title
             records.append(
