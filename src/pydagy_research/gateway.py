@@ -46,6 +46,16 @@ def _normalize(value: str) -> str:
     return " ".join(value.strip().lower().split())
 
 
+# Below this many characters, a read_url_content/view_file extraction is
+# treated as "too thin to be useful" and AntigravitySDKGateway.read() falls
+# back to the model's own response text instead (see
+# _apply_response_text_fallback's docstring for why, and FINDINGS.md §5 for
+# the live trace that led to this). A judgment call, not a precise
+# threshold: real single-fact extracts (e.g. a page <title>) tend to land
+# well above this; the failure mode this guards against was a one-line
+# non-answer caption in the low tens of characters.
+_MIN_USEFUL_READ_CHARS = 80
+
 _antigravity_types_module: Any = None
 
 
@@ -197,7 +207,16 @@ class AntigravitySDKGateway:
         return records or [self._missing_call_record(action="search", value=query)]
 
     async def read(self, url: str) -> EvidenceRecord:
-        prompt = f"Use the read_url_content tool to read exactly this URL: {url!r}."
+        prompt = (
+            f"Use the read_url_content tool to read exactly this URL: {url!r}. "
+            "If the tool's summary comes back empty or just a few words, that "
+            "almost always means the page was too large to summarize and got "
+            "cached to disk instead — read_url_content will have populated "
+            "content_path in that case (see its content_path field). You MUST "
+            "then call view_file on that content_path before finishing this "
+            "turn; a thin or empty summary is not a completed read, it's a "
+            "signal to go look at the cached file."
+        )
         records = await self._run_turn(action="read", value=url, prompt=prompt)
         for record in records:
             if record.source_kind == "page_content":
@@ -237,7 +256,7 @@ class AntigravitySDKGateway:
         self._pending_call_args.clear()  # defensive: no carry-over if a prior turn errored mid-call
         try:
             response = await self._agent.chat(prompt)
-            await response.text()  # drain the stream; evidence is captured by the post_tool_call hook
+            response_text = await response.text()
         except (
             types.AntigravityConnectionError,
             types.AntigravityExecutionError,
@@ -246,7 +265,47 @@ class AntigravitySDKGateway:
         ) as exc:
             _logger.warning("Antigravity gateway turn failed (%s=%r): %s", action, value, exc)
             return [self._failed_record(action=action, value=value, error=str(exc))]
+
+        if action == "read":
+            self._apply_response_text_fallback(response_text)
         return list(self._turn_records)
+
+    def _apply_response_text_fallback(self, response_text: str) -> None:
+        """Falls back to the model's own final response text when typed extraction came back too thin.
+
+        Confirmed live (FINDINGS.md §5): `view_file`'s `PostTool` payload is
+        NOT the viewed file's content. `VIEW_FILE` isn't in the SDK's
+        `_TOOL_RESULT_MODELS` mapping (only `RUN_COMMAND`/`LIST_DIR`/
+        `FIND_FILE`/`SEARCH_DIR`/`EDIT_FILE`/`GENERATE_IMAGE`/`SEARCH_WEB`/
+        `READ_URL_CONTENT` are), so the post-tool-call hook only ever sees a
+        short caption like `"View cached LangChain CVE results"` — never the
+        file's actual text. On a large/cached page, the real content the
+        model saw is only recoverable from its own final response text,
+        which is exactly the "ungrounded model paraphrase" PLAN.md §2 says
+        must never become `raw_extract` — so this is a deliberate, narrow
+        exception, used only when the typed extraction is empty or
+        near-empty (confirmed live: without it, `read_url_content` ->
+        empty summary -> `view_file` -> a caption, not content -> the
+        pipeline had nothing at all for large pages). This mirrors the same
+        accepted trade-off `PydanticNativeSearchGateway` already makes for
+        its own backend (PLAN.md §1: "falling back to raw_extract as an
+        opaque blob otherwise").
+        """
+        response_text = response_text.strip()
+        if not response_text:
+            return
+        for record in self._turn_records:
+            if record.source_kind != "page_content" or record.status != "success":
+                continue
+            if len(record.raw_extract.strip()) < _MIN_USEFUL_READ_CHARS < len(response_text):
+                _logger.info(
+                    "read_url_content/view_file extraction was thin (%d chars) for %s;"
+                    " falling back to the model's own response text (%d chars)",
+                    len(record.raw_extract),
+                    record.source_url,
+                    len(response_text),
+                )
+                record.raw_extract = response_text
 
     def _missing_call_record(self, *, action: str, value: str) -> EvidenceRecord:
         return self._failed_record(

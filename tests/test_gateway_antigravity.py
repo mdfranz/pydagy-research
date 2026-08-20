@@ -10,12 +10,15 @@ directly with real `google.antigravity.types` objects.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import pytest
 from google.antigravity import LocalAgentConfig, types
 from google.antigravity.connections.local import types as local_types
 from google.antigravity.hooks import hooks as ga_hooks
 
 from pydagy_research.gateway import AntigravitySDKGateway
+from pydagy_research.models import EvidenceRecord
 
 
 def _gateway() -> AntigravitySDKGateway:
@@ -222,6 +225,67 @@ def test_build_hooks_adds_sdk_otel_hooks_when_enabled():
 
     config = LocalAgentConfig(hooks=all_hooks)
     config.model_copy(deep=True)  # must not raise
+
+
+def _thin_page_content_record(raw_extract: str = "LangChain CVE content") -> EvidenceRecord:
+    return EvidenceRecord(
+        evidence_id="RAW-thin",
+        source_url="https://cve.mitre.org/cgi-bin/cvekey.cgi?keyword=langchain",
+        source_kind="page_content",
+        title="MITRE CVE search",
+        raw_extract=raw_extract,
+        timestamp=datetime.now(timezone.utc),
+        status="success",
+    )
+
+
+def test_apply_response_text_fallback_replaces_thin_extract():
+    """Regression test for the view_file-doesn't-carry-content finding
+
+    (FINDINGS.md §5): read_url_content/view_file left a 21-character
+    non-answer ("LangChain CVE content") in raw_extract; the model's own
+    final response text had 2128 characters of real CVE detail. The
+    fallback should replace the thin extract with that richer text.
+    """
+    gateway = _gateway()
+    gateway._turn_records = [_thin_page_content_record()]
+
+    rich_text = "CVE-2025-68664: ... " * 10  # well over the 80-char threshold
+    gateway._apply_response_text_fallback(rich_text)
+
+    assert gateway._turn_records[0].raw_extract == rich_text.strip()
+
+
+def test_apply_response_text_fallback_leaves_rich_extract_alone():
+    gateway = _gateway()
+    rich_original = "A" * 200
+    gateway._turn_records = [_thin_page_content_record(rich_original)]
+
+    gateway._apply_response_text_fallback("some other response text " * 10)
+
+    assert gateway._turn_records[0].raw_extract == rich_original
+
+
+def test_apply_response_text_fallback_does_nothing_when_response_text_also_thin():
+    gateway = _gateway()
+    original = "LangChain CVE content"
+    gateway._turn_records = [_thin_page_content_record(original)]
+
+    gateway._apply_response_text_fallback("also thin")
+
+    assert gateway._turn_records[0].raw_extract == original
+
+
+def test_apply_response_text_fallback_ignores_failed_and_search_summary_records():
+    gateway = _gateway()
+    failed = _thin_page_content_record("").model_copy(update={"status": "failed"})
+    search_summary = _thin_page_content_record().model_copy(update={"source_kind": "search_summary"})
+    gateway._turn_records = [failed, search_summary]
+
+    gateway._apply_response_text_fallback("rich response text " * 10)
+
+    assert gateway._turn_records[0].raw_extract == ""
+    assert gateway._turn_records[1].raw_extract == "LangChain CVE content"
 
 
 class _RaisingAgent:
