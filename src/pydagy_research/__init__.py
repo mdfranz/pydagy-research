@@ -40,9 +40,18 @@ def main() -> None:
     Requires a configured `pydantic_ai` model provider (e.g. `GEMINI_API_KEY`
     for the default `retrieval_backend="antigravity"` — see PLAN.md
     "Runtime & Environment Requirements").
+
+    Logs the full run (this package's + the Antigravity SDK's own
+    session/tool-call trace) to `./pydagy-research.log`, appended across
+    runs. Override with `PYDAGY_RESEARCH_LOG_FILE` / `PYDAGY_RESEARCH_LOG_LEVEL`.
     """
     import asyncio
     import sys
+
+    from .logging_config import configure_file_logging
+
+    log_path = configure_file_logging()
+    print(f"(logging to {log_path})", file=sys.stderr)
 
     question = " ".join(sys.argv[1:]) or "What is the latest stable Python release?"
     answer = asyncio.run(run_research(question, model="google:gemini-3.7-flash"))
