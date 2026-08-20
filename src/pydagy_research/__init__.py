@@ -46,25 +46,51 @@ def main() -> None:
     Logs the full run (this package's + the Antigravity SDK's own
     session/tool-call trace) to `./pydagy-research.log`, appended across
     runs. Override with `PYDAGY_RESEARCH_LOG_FILE` / `PYDAGY_RESEARCH_LOG_LEVEL`.
-
-    Pass `--browser` to render `.read()` pages with real headless Chromium
-    instead of a static HTML fetch (requires `uv sync --extra browser` +
-    `uv run playwright install chromium` — see browser_gateway.py).
     """
+    import argparse
     import asyncio
     import sys
 
     from .logging_config import configure_file_logging
 
+    parser = argparse.ArgumentParser(
+        prog="pydagy-research", description="Run one question through the grounded research pipeline (PLAN.md §6)."
+    )
+    parser.add_argument(
+        "question", nargs="*", help="The research question (default: a Python-release smoke question)."
+    )
+    parser.add_argument(
+        "--backend",
+        choices=["antigravity", "pydantic_native"],
+        default="antigravity",
+        help="Retrieval backend (PLAN.md §1). Default: antigravity.",
+    )
+    parser.add_argument(
+        "--browser",
+        action="store_true",
+        help=(
+            "Render .read() pages with real headless Chromium instead of a static HTML"
+            " fetch, on either backend (requires `uv sync --extra browser` + `uv run"
+            " playwright install chromium` — see browser_gateway.py)."
+        ),
+    )
+    parser.add_argument(
+        "--model",
+        default="google:gemini-3.7-flash",
+        help="pydantic_ai model id for the Planner/Writer agents.",
+    )
+    args = parser.parse_args()
+
     log_path = configure_file_logging()
     print(f"(logging to {log_path})", file=sys.stderr)
 
-    args = sys.argv[1:]
-    use_headless_browser = "--browser" in args
-    args = [a for a in args if a != "--browser"]
-
-    question = " ".join(args) or "What is the latest stable Python release?"
+    question = " ".join(args.question) or "What is the latest stable Python release?"
     answer = asyncio.run(
-        run_research(question, model="google:gemini-3.7-flash", use_headless_browser=use_headless_browser)
+        run_research(
+            question,
+            model=args.model,
+            retrieval_backend=args.backend,
+            use_headless_browser=args.browser,
+        )
     )
     print(answer.model_dump_json(indent=2))
