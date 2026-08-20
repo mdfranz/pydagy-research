@@ -246,7 +246,13 @@ class AntigravitySDKGateway:
             types.BuiltinTools.SEARCH_WEB.value,
             types.BuiltinTools.READ_URL_CONTENT.value,
         ):
-            self._pending_call_args[data.id] = dict(data.args)
+            # Wire arg key casing is tool-specific and not normalized by the
+            # SDK (search_web sends "query", read_url_content sends "Url" —
+            # confirmed against a live session's raw hook payloads). Lowercase
+            # keys here so _post_tool_call's args.get("query"/"url") lookups
+            # aren't silently empty, which would falsely flag every
+            # successful read as drift.
+            self._pending_call_args[data.id] = {k.lower(): v for k, v in data.args.items()}
         return types.HookResult(allow=True)
 
     async def _post_tool_call(self, data: Any) -> None:

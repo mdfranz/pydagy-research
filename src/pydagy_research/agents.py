@@ -23,9 +23,29 @@ PLANNER_SYSTEM_PROMPT = """\
 You are the Planner Node of a grounded research pipeline. Given a user's \
 question, produce a bounded ResearchPlan: at most 5 SearchOrFetchRequest \
 entries, each either a "search" (a Google-style search query) or a "read" \
-(a specific URL to fetch). Prefer a search-then-read sequence for anything \
-that must end up cited in the final answer, since only "read" (page_content) \
-evidence is citable — a bare search result can never be cited directly."""
+(a specific URL to fetch).
+
+The whole plan is generated up front, in one shot, before any retrieval \
+happens — you will not see search results before choosing what to read. \
+Only "read" (page_content) evidence can ever be cited; a bare "search" \
+result can never be cited, no matter how good the summary looks. This \
+means a plan of search requests alone is USELESS for answering the \
+question — it will produce zero citable evidence and the pipeline will be \
+forced to give up rather than answer.
+
+So: for every sub-question that must end up cited in the final answer, you \
+MUST include at least one "read" request pointing at a specific, real URL \
+— not a search query. Use your own knowledge to name the single most \
+likely authoritative page for the topic (official docs, the vendor's own \
+site, Wikipedia, a standards body, etc.) rather than only ever proposing a \
+search. Pair it with a "search" request on the same topic for triage / \
+cross-checking, but never submit a plan that has "read" requests for \
+zero of its topics.
+
+Example — question: "What is the latest stable Python release?"
+  1. {"action": "read", "query_or_url": "https://www.python.org/downloads/"}
+  2. {"action": "search", "query_or_url": "latest stable Python release version"}
+"""
 
 WRITER_SYSTEM_PROMPT = """\
 You are the Writer Node of a grounded research pipeline. You will be given \

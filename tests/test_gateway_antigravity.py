@@ -103,6 +103,37 @@ async def test_post_tool_call_builds_page_content_record_no_drift():
     assert record.title == "Expected Page"
     assert record.raw_extract == "clean text"
     assert record.drift_flagged is False
+
+
+async def test_pre_tool_call_lowercases_arg_keys_so_no_false_drift():
+    """Regression test: a live session showed read_url_content's wire args
+
+    keyed as {"Url": ...} (capitalized), while search_web's are {"query":
+    ...} (lowercase) — the SDK doesn't normalize casing itself. Before the
+    fix, _post_tool_call's `args.get("url", "")` silently returned "" for
+    every successful read, flagging it as drift and dropping otherwise-good
+    evidence at the Validator Node.
+    """
+    gateway = _gateway()
+    call = types.ToolCall(
+        name=types.BuiltinTools.READ_URL_CONTENT.value,
+        args={"Url": "https://example.com/expected"},  # capitalized, as seen on the wire
+        id="call-1",
+    )
+    await gateway._pre_tool_call(call)
+
+    gateway._expected_action = "read"
+    gateway._expected_value = "https://example.com/expected"
+    result = types.ToolResult(
+        id="call-1",
+        name=types.BuiltinTools.READ_URL_CONTENT.value,
+        result=local_types.ReadUrlContentResult(title="Expected Page", summary="clean text", content_path=""),
+    )
+    await gateway._post_tool_call(result)
+
+    record = gateway._turn_records[0]
+    assert record.source_url == "https://example.com/expected"
+    assert record.drift_flagged is False
     assert record.status == "success"
 
 
