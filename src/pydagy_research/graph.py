@@ -1,0 +1,192 @@
+"""Host Pipeline Workflow (PLAN.md §6): the `pydantic_graph` state machine.
+
+    Planner -> Retrieval -> Validator -> Writer -> [CheckCitations] -> End
+                                            ^______________|  (bounded retry)
+
+Pydantic AI owns all reasoning (Planner, Writer); this module owns typed
+state transitions, evidence pooling, and the citation-grounding gate that
+makes the "deterministic evidence grounding" claim in PLAN.md's Summary hold.
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Any
+
+from pydantic_graph import BaseNode, End, Graph, GraphBuilder, GraphRunContext, StepContext
+
+from .agents import WriterDeps, build_planner_agent, build_writer_agent, planner_prompt, writer_prompt
+from .gateway import RetrievalGateway, make_gateway, run_plan
+from .models import EvidenceRecord, ResearchAnswer, ResearchPlan, RetrievalBackend
+
+__all__ = [
+    "PipelineState",
+    "PipelineDeps",
+    "PlannerNode",
+    "RetrievalNode",
+    "ValidatorNode",
+    "WriterNode",
+    "build_graph",
+]
+
+_logger = logging.getLogger(__name__)
+
+
+@dataclass
+class PipelineState:
+    """Mutable state threaded through the graph run (PLAN.md §6)."""
+
+    question: str
+    retrieval_backend: RetrievalBackend = "antigravity"
+    plan: ResearchPlan | None = None
+    raw_evidence: list[EvidenceRecord] = field(default_factory=list)
+    evidence_pool: dict[str, EvidenceRecord] = field(default_factory=dict)
+    write_attempts: int = 0
+    validation_errors: list[str] = field(default_factory=list)
+
+
+@dataclass
+class PipelineDeps:
+    """Injected collaborators: the two Pydantic AI agents and the gateway factory.
+
+    `gateway_factory` defaults to `make_gateway` (PLAN.md §1's
+    `retrieval_backend`-keyed selection) but is overridable so tests can
+    inject a fake `RetrievalGateway` without touching either SDK.
+    """
+
+    planner_agent: Any
+    writer_agent: Any
+    gateway_factory: Callable[[ResearchPlan], RetrievalGateway] = make_gateway
+    max_write_attempts: int = 2
+
+
+@dataclass
+class PlannerNode(BaseNode[PipelineState, PipelineDeps]):
+    """1. Planner Node (PLAN.md §6.1): generates the bounded `ResearchPlan`."""
+
+    async def run(self, ctx: GraphRunContext[PipelineState, PipelineDeps]) -> "RetrievalNode":
+        result = await ctx.deps.planner_agent.run(planner_prompt(ctx.state.question))
+        plan: ResearchPlan = result.output
+        # The host, not the model, controls which retrieval backend runs
+        # (PLAN.md §1: "a config toggle, not a one-way architectural door").
+        ctx.state.plan = plan.model_copy(update={"retrieval_backend": ctx.state.retrieval_backend})
+        return RetrievalNode()
+
+
+@dataclass
+class RetrievalNode(BaseNode[PipelineState, PipelineDeps]):
+    """2. Retrieval Gateway Node (PLAN.md §6.2): executes the plan sequentially."""
+
+    async def run(self, ctx: GraphRunContext[PipelineState, PipelineDeps]) -> "ValidatorNode":
+        assert ctx.state.plan is not None, "PlannerNode must run before RetrievalNode"
+        gateway = ctx.deps.gateway_factory(ctx.state.plan)
+        async with gateway:
+            ctx.state.raw_evidence = await run_plan(gateway, ctx.state.plan)
+        return ValidatorNode()
+
+
+@dataclass
+class ValidatorNode(BaseNode[PipelineState, PipelineDeps]):
+    """3. Evidence Validator Node (PLAN.md §6.3).
+
+    Normalizes URLs, prunes near-duplicates, assigns stable `EVID-xxx` ids,
+    and filters out failed fetches and drift-flagged records — the Writer
+    Node only ever sees evidence that survived this gate.
+    """
+
+    async def run(self, ctx: GraphRunContext[PipelineState, PipelineDeps]) -> "WriterNode":
+        pool: dict[str, EvidenceRecord] = {}
+        seen_urls: set[str] = set()
+        next_index = 1
+        for record in ctx.state.raw_evidence:
+            if record.status != "success" or record.drift_flagged:
+                continue
+            normalized_url = record.source_url.strip().lower()
+            if normalized_url in seen_urls:
+                continue
+            seen_urls.add(normalized_url)
+            stable_id = f"EVID-{next_index:03d}"
+            next_index += 1
+            pool[stable_id] = record.model_copy(update={"evidence_id": stable_id})
+        ctx.state.evidence_pool = pool
+        return WriterNode()
+
+
+@dataclass
+class WriterNode(BaseNode[PipelineState, PipelineDeps, ResearchAnswer]):
+    """4. Grounded Writer Node (PLAN.md §6.4) + the `CheckCitations` decision gate.
+
+    The Writer agent's own `output_validator` (see `agents.build_writer_agent`)
+    already retries in-place against `ModelRetry`. This node is the outer,
+    bounded backstop: if those in-agent retries are exhausted and validation
+    still fails, it loops back to itself (mirroring the diagram's
+    `CheckCitations -- No --> WriteNode` edge) up to `max_write_attempts`
+    times before degrading to a limitations-only answer rather than emitting
+    an ungrounded one.
+    """
+
+    async def run(
+        self, ctx: GraphRunContext[PipelineState, PipelineDeps]
+    ) -> "WriterNode | End[ResearchAnswer]":
+        from pydantic_ai.exceptions import UnexpectedModelBehavior
+
+        ctx.state.write_attempts += 1
+        prompt = writer_prompt(ctx.state.question, ctx.state.evidence_pool)
+        deps = WriterDeps(evidence_pool=ctx.state.evidence_pool)
+        try:
+            result = await ctx.deps.writer_agent.run(prompt, deps=deps)
+        except UnexpectedModelBehavior as exc:
+            _logger.warning(
+                "Writer Node failed grounding validation (attempt %d/%d): %s",
+                ctx.state.write_attempts,
+                ctx.deps.max_write_attempts,
+                exc,
+            )
+            ctx.state.validation_errors.append(str(exc))
+            if ctx.state.write_attempts < ctx.deps.max_write_attempts:
+                return WriterNode()
+            return End(
+                ResearchAnswer(
+                    answer="",
+                    claims=[],
+                    citations=[],
+                    limitations=[
+                        "Unable to produce a fully grounded answer from the retrieved evidence"
+                        f" after {ctx.state.write_attempts} attempt(s): {ctx.state.validation_errors[-1]}"
+                    ],
+                )
+            )
+        return End(result.output)
+
+
+def build_graph() -> Graph[PipelineState, PipelineDeps, None, ResearchAnswer]:
+    """Assembles the `pydantic_graph` Graph described in PLAN.md §6."""
+    g = GraphBuilder(
+        name="research_pipeline",
+        state_type=PipelineState,
+        deps_type=PipelineDeps,
+        output_type=ResearchAnswer,
+    )
+
+    @g.step
+    async def start(ctx: StepContext[PipelineState, PipelineDeps, None]) -> PlannerNode:
+        return PlannerNode()
+
+    g.add(
+        g.node(PlannerNode),
+        g.node(RetrievalNode),
+        g.node(ValidatorNode),
+        g.node(WriterNode),
+        g.edge_from(g.start_node).to(start),
+    )
+    return g.build()
+
+
+def default_deps(model: Any) -> PipelineDeps:
+    """Convenience: build `PipelineDeps` with real Planner/Writer agents on `model`."""
+    return PipelineDeps(
+        planner_agent=build_planner_agent(model),
+        writer_agent=build_writer_agent(model),
+    )
