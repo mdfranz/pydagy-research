@@ -229,24 +229,49 @@ same Planner, run twice, with ordinary sampling variance.
   cost is structural, not run-to-run noise: the nginx/Apache comparison was
   44s (`pydantic_native`) vs. 75s (Antigravity); LangChain/Agno was 28s vs.
   75s.
-- **Retrieval-layer quality when `--browser` is off, or when the browser
-  render fails.** This is where the two SDKs' own extraction genuinely
-  differs — Antigravity's `read_url_content` came back completely empty
-  (`title=""`, `summary=""`) on `cve.mitre.org` in the very first
-  (pre-`--browser`) LangChain run, while `pydantic_native`'s
-  fallback-to-`output` path at least captured real synthesized content on
-  the same kind of miss. Not yet re-verified in a controlled, `--browser`-off
-  head-to-head (see Open Questions).
+- **Retrieval-layer quality when `--browser` is off.** This is where the two
+  SDKs' own extraction genuinely differs, and it's a large gap, not a small
+  one — confirmed with a controlled, isolated experiment: same URL
+  (`cve.mitre.org/cgi-bin/cvekey.cgi?keyword=langchain`), both backends,
+  `.read()` called directly with no `BrowserAugmentedGateway` wrapper and no
+  Planner/Writer in the loop.
 
-**Takeaway:** the retrieval backend choice mainly affects latency under
-`--browser`, not evidence quality — `BrowserAugmentedGateway` neutralizes
-most of the quality difference between the two SDKs' own fetch mechanisms
-by short-circuiting them on success. This is a real, if still small-sample
-(3 comparisons), data point against PLAN.md's stated default assumption
-("Google's Search backend is more robust, so Antigravity is the default" —
-PLAN.md §1, §"Assumptions & Boundaries"). Not yet enough evidence to revise
-the default; enough to say the assumption needs the actual Benchmark
-Comparator PLAN.md already calls for (§Test Plan), not anecdotal runs.
+  ```
+  AntigravitySDKGateway (no browser):       status=success, raw_extract length=21
+    -> "LangChain CVE content"
+  PydanticNativeSearchGateway (no browser): status=success, raw_extract length=8677
+    -> real content, 25 "CVE-" occurrences, real CVE-2026-7847 etc. descriptions
+  ```
+
+  Both report `status="success"` with no error — this is worse than an
+  outright failure, because nothing downstream catches it: the Evidence
+  Validator Node only filters `status=="failed"` or `drift_flagged`, so
+  Antigravity's 21-character non-answer sails through as legitimate
+  `page_content` evidence. This is almost certainly the same
+  `read_url_content` → `VIEW_FILE` follow-through gap PLAN.md §1.1
+  anticipates (large pages spill to `content_path`; the model has to
+  separately call `view_file` to read the cache) — except here the model
+  didn't follow through at all, not even partially, and the pipeline has no
+  signal that anything went wrong. `pydantic_native`'s `WebFetch`
+  fallback-to-`output` path reliably captured the real content instead,
+  because Gemini's hosted fetch does real server-side retrieval and reports
+  back at length regardless of whether the structured tool-return carries
+  it (finding 1.4's mechanism, working in this case's favor).
+
+**Takeaway:** the retrieval backend choice mainly affects latency once
+`--browser` is on — `BrowserAugmentedGateway` neutralizes most of the
+quality difference between the two SDKs' own fetch mechanisms by
+short-circuiting them on success (§3, nginx experiment). With `--browser`
+off, the quality difference is real and substantial in Antigravity's favor
+to lose: a "successful" read can silently return next to nothing. This is a
+real, if still small-sample, data point against PLAN.md's stated default
+assumption ("Google's Search backend is more robust, so Antigravity is the
+default" — PLAN.md §1, §"Assumptions & Boundaries") specifically for the
+large-page/`content_path` case — not enough evidence yet to revise the
+default outright, enough to say the assumption needs the actual Benchmark
+Comparator PLAN.md already calls for (§Test Plan), not anecdotal runs, and
+that the `VIEW_FILE` follow-through gap is a concrete, fixable candidate
+rather than a vague known-limitation footnote.
 
 ---
 
@@ -270,10 +295,13 @@ explicable structural difference in turn count.
 
 ## 5. Open questions / suggested next steps
 
-- **Isolate true backend fetch quality**: re-run the original empty-`mitre.org`
-  case with `--browser` *off* on both backends, controlled (same URL, same
-  question), to confirm §3's claim that the real retrieval-quality gap only
-  shows up without browser augmentation.
+- **Fix the `VIEW_FILE` follow-through gap** (§3): strengthen the Antigravity
+  `read()` prompt to explicitly require calling `view_file` on `content_path`
+  whenever the initial `summary`/`title` come back empty or suspiciously
+  short, rather than treating a thin result as done. Candidate fix, not yet
+  implemented — the exact wording needs the same kind of live verification
+  every other prompt fix in this document got, not just a plausible-looking
+  instruction.
 - **Replace anecdotal comparison with PLAN.md's actual Benchmark
   Comparator** (§Test Plan): citation accuracy/coverage, unsupported-claim
   rate, latency, and token consumption, across enough runs per backend to
