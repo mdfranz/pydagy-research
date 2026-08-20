@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from pydantic_ai import Agent, RunContext
+from pydantic_ai.capabilities import WebSearch
 from pydantic_ai.exceptions import ModelRetry
 
 from .models import EvidenceRecord, ResearchAnswer, ResearchPlan, validate_research_answer
@@ -25,8 +26,9 @@ question, produce a bounded ResearchPlan: at most 5 SearchOrFetchRequest \
 entries, each either a "search" (a Google-style search query) or a "read" \
 (a specific URL to fetch).
 
-The whole plan is generated up front, in one shot, before any retrieval \
-happens — you will not see search results before choosing what to read. \
+The plan you output is executed exactly as written and only once — the \
+Retrieval Node that runs after you has no way to see what a "read" turned \
+up and go pick a better URL; whatever you put in `query_or_url` is final. \
 Only "read" (page_content) evidence can ever be cited; a bare "search" \
 result can never be cited, no matter how good the summary looks. This \
 means a plan of search requests alone is USELESS for answering the \
@@ -35,16 +37,29 @@ forced to give up rather than answer.
 
 So: for every sub-question that must end up cited in the final answer, you \
 MUST include at least one "read" request pointing at a specific, real URL \
-— not a search query. Use your own knowledge to name the single most \
-likely authoritative page for the topic (official docs, the vendor's own \
-site, Wikipedia, a standards body, etc.) rather than only ever proposing a \
-search. Pair it with a "search" request on the same topic for triage / \
+— not a search query, and not a generic index/listing page when a more \
+specific page is what actually has the answer. You have your own web \
+search available *right now*, before you finalize the plan — use it to \
+find the single specific, current page, not just a plausible-looking \
+index. This matters most for anything versioned, numbered, or frequently \
+updated (a specific security advisory, a specific release's notes, a \
+specific CVE record): a vendor's top-level "/security/advisories/" index \
+page lists advisory names but usually omits the actual CVE numbers or \
+technical detail that live on each advisory's own page — reading the \
+index alone will not get you a citable answer to "what CVE was this."
+
+Pair each "read" with a "search" request on the same topic for triage / \
 cross-checking, but never submit a plan that has "read" requests for \
 zero of its topics.
 
 Example — question: "What is the latest stable Python release?"
   1. {"action": "read", "query_or_url": "https://www.python.org/downloads/"}
   2. {"action": "search", "query_or_url": "latest stable Python release version"}
+
+Example — question: "What CVEs were recently fixed in Firefox?" (an index
+page is not enough here — use your search to find the specific advisory):
+  1. {"action": "read", "query_or_url": "https://www.mozilla.org/en-US/security/advisories/mfsa2026-74/"}
+  2. {"action": "search", "query_or_url": "Firefox 154 security advisory CVE"}
 """
 
 WRITER_SYSTEM_PROMPT = """\
@@ -79,10 +94,31 @@ def writer_prompt(question: str, evidence_pool: dict[str, EvidenceRecord]) -> st
     return f"User question: {question}\n\nEvidence pool:\n{evidence_block}\n\nProduce the ResearchAnswer."
 
 
-def build_planner_agent(model: Any) -> Agent[None, ResearchPlan]:
-    """Builds the Planner Node's agent (PLAN.md §6.1)."""
+def build_planner_agent(model: Any, *, enable_search: bool = True) -> Agent[None, ResearchPlan]:
+    """Builds the Planner Node's agent (PLAN.md §6.1).
+
+    `enable_search=True` (the default) gives the Planner its own `WebSearch`
+    capability so it can look up a real, current, *specific* URL before
+    committing to the plan — the plan is generated in one shot with no
+    chance to revise a "read" target after the fact (PLAN.md's static
+    graph has no back-edge from Retrieval to Planner), so a wrong guess
+    here (e.g. a vendor's generic advisory index instead of the one
+    advisory page that actually has the CVE numbers) can't be corrected
+    downstream by any amount of better reading/rendering. Set to False for
+    `TestModel`-based tests: `TestModel` raises `UserError` on any
+    configured capability regardless of whether it's actually invoked.
+
+    This search is planning-time grounding only — its results never become
+    `EvidenceRecord`s or citable evidence; only the Retrieval Node's own
+    `search()`/`read()` calls (PLAN.md §1) produce those.
+    """
+    capabilities = [WebSearch()] if enable_search else []
     return Agent(
-        model, name="planner_agent", output_type=ResearchPlan, system_prompt=PLANNER_SYSTEM_PROMPT
+        model,
+        name="planner_agent",
+        output_type=ResearchPlan,
+        system_prompt=PLANNER_SYSTEM_PROMPT,
+        capabilities=capabilities,
     )
 
 

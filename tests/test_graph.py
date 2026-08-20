@@ -92,7 +92,7 @@ async def test_full_pipeline_success_path(evidence):
     graph = build_graph()
     state = PipelineState(question="What is the capital of France?", retrieval_backend="pydantic_native")
     probe_deps = PipelineDeps(
-        planner_agent=build_planner_agent(planner_model),
+        planner_agent=build_planner_agent(planner_model, enable_search=False),
         writer_agent=build_writer_agent(TestModel(custom_output_args={
             "answer": "placeholder",
             "claims": [],
@@ -121,7 +121,7 @@ async def test_full_pipeline_success_path(evidence):
         "limitations": [],
     }
     deps2 = PipelineDeps(
-        planner_agent=build_planner_agent(planner_model),
+        planner_agent=build_planner_agent(planner_model, enable_search=False),
         writer_agent=build_writer_agent(TestModel(custom_output_args=writer_output)),
         gateway_factory=gateway_factory,
     )
@@ -149,7 +149,7 @@ async def test_pipeline_degrades_gracefully_when_writer_cannot_ground(evidence):
     graph = build_graph()
     state = PipelineState(question="q", retrieval_backend="pydantic_native")
     deps = PipelineDeps(
-        planner_agent=build_planner_agent(planner_model),
+        planner_agent=build_planner_agent(planner_model, enable_search=False),
         writer_agent=build_writer_agent(TestModel()),
         gateway_factory=gateway_factory,
         max_write_attempts=2,
