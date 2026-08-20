@@ -81,7 +81,9 @@ def writer_prompt(question: str, evidence_pool: dict[str, EvidenceRecord]) -> st
 
 def build_planner_agent(model: Any) -> Agent[None, ResearchPlan]:
     """Builds the Planner Node's agent (PLAN.md §6.1)."""
-    return Agent(model, output_type=ResearchPlan, system_prompt=PLANNER_SYSTEM_PROMPT)
+    return Agent(
+        model, name="planner_agent", output_type=ResearchPlan, system_prompt=PLANNER_SYSTEM_PROMPT
+    )
 
 
 @dataclass
@@ -110,6 +112,7 @@ def build_writer_agent(model: Any) -> Agent[WriterDeps, ResearchAnswer]:
     """
     agent: Agent[WriterDeps, ResearchAnswer] = Agent(
         model,
+        name="writer_agent",
         deps_type=WriterDeps,
         output_type=ResearchAnswer,
         system_prompt=WRITER_SYSTEM_PROMPT,

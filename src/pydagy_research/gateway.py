@@ -339,10 +339,10 @@ class PydanticNativeSearchGateway:
         from pydantic_ai.capabilities import WebFetch, WebSearch
 
         self._search_agent: Any = PydanticAgent(
-            model, capabilities=[WebSearch(**(search_kwargs or {}))]
+            model, name="native_search_agent", capabilities=[WebSearch(**(search_kwargs or {}))]
         )
         self._fetch_agent: Any = PydanticAgent(
-            model, capabilities=[WebFetch(**(fetch_kwargs or {}))]
+            model, name="native_fetch_agent", capabilities=[WebFetch(**(fetch_kwargs or {}))]
         )
 
     async def __aenter__(self) -> "PydanticNativeSearchGateway":

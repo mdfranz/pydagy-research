@@ -46,12 +46,16 @@ def main() -> None:
     Logs the full run (this package's + the Antigravity SDK's own
     session/tool-call trace) to `./pydagy-research.log`, appended across
     runs. Override with `PYDAGY_RESEARCH_LOG_FILE` / `PYDAGY_RESEARCH_LOG_LEVEL`.
+
+    Also enables Logfire tracing of every agent run/tool call/model request
+    when `LOGFIRE_TOKEN` is set in the environment — a no-op otherwise.
     """
     import argparse
     import asyncio
     import sys
 
     from .logging_config import configure_file_logging
+    from .tracing import configure_tracing
 
     parser = argparse.ArgumentParser(
         prog="pydagy-research", description="Run one question through the grounded research pipeline (PLAN.md §6)."
@@ -83,6 +87,9 @@ def main() -> None:
 
     log_path = configure_file_logging()
     print(f"(logging to {log_path})", file=sys.stderr)
+
+    if configure_tracing():
+        print("(logfire tracing enabled)", file=sys.stderr)
 
     question = " ".join(args.question) or "What is the latest stable Python release?"
     answer = asyncio.run(
