@@ -17,8 +17,6 @@ from pydagy_research.gateway import RetrievalGateway
 from pydagy_research.graph import PipelineDeps, PipelineState, build_graph
 from pydagy_research.models import EvidenceRecord, ResearchPlan, SearchOrFetchRequest
 
-pytestmark = pytest.mark.asyncio
-
 
 class _FakeGateway:
     """A `RetrievalGateway` returning canned evidence, no SDK involved."""

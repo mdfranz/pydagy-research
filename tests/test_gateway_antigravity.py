@@ -3,8 +3,7 @@
 These exercise the hook-based evidence extraction and drift check directly,
 without launching a real `localharness` subprocess: `Agent.__aenter__()`
 requires the compiled binary and network access, which unit tests must not
-depend on. Instead we build a bare gateway instance, set the two bits of
-state `__aenter__` would normally set (`_ga_types`, `_agent`), and drive the
+depend on. Instead we build a bare gateway instance and drive the
 `@pre_tool_call_decide` / `@post_tool_call` hook methods and `_run_turn`
 directly with real `google.antigravity.types` objects.
 """
@@ -12,18 +11,15 @@ directly with real `google.antigravity.types` objects.
 from __future__ import annotations
 
 import pytest
-from google.antigravity import types
+from google.antigravity import LocalAgentConfig, types
 from google.antigravity.connections.local import types as local_types
+from google.antigravity.hooks import hooks as ga_hooks
 
 from pydagy_research.gateway import AntigravitySDKGateway
 
-pytestmark = pytest.mark.asyncio
-
 
 def _gateway() -> AntigravitySDKGateway:
-    gateway = AntigravitySDKGateway()
-    gateway._ga_types = types  # normally set in __aenter__
-    return gateway
+    return AntigravitySDKGateway()
 
 
 async def test_pre_tool_call_captures_args_and_always_allows():
@@ -152,6 +148,24 @@ async def test_post_tool_call_appends_view_file_content_to_last_page_content_rec
     assert len(gateway._turn_records) == 1
     assert "short preview" in gateway._turn_records[0].raw_extract
     assert "the full cached page content" in gateway._turn_records[0].raw_extract
+
+
+def test_hooks_survive_agent_config_deepcopy():
+    """Regression test: `Agent.__init__` does `config.model_copy(deep=True)`
+
+    on the whole `AgentConfig`, including its `hooks` list. Our hooks are
+    bound methods of the gateway instance, so `self` (and everything
+    reachable from it) must be deepcopy-safe, or construction blows up with
+    `TypeError: cannot pickle 'module' object` before a single tool call
+    ever happens (see the module-level `_antigravity_types()` docstring in
+    gateway.py for why a module reference must never live on `self`).
+    """
+    gateway = _gateway()
+    pre_hook = ga_hooks.pre_tool_call_decide(gateway._pre_tool_call)
+    post_hook = ga_hooks.post_tool_call(gateway._post_tool_call)
+    config = LocalAgentConfig(hooks=[pre_hook, post_hook])
+
+    config.model_copy(deep=True)  # must not raise
 
 
 class _RaisingAgent:

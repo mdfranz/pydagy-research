@@ -33,4 +33,4 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-asyncio_mode = "strict"
+asyncio_mode = "auto"

@@ -93,7 +93,6 @@ class _RaisingAgent:
         raise UnexpectedModelBehavior("model refused to call the tool")
 
 
-@pytest.mark.asyncio
 async def test_search_translates_agent_run_error_to_failed_record():
     gateway = _bare_gateway()
     gateway._search_agent = _RaisingAgent()
@@ -106,7 +105,6 @@ async def test_search_translates_agent_run_error_to_failed_record():
     assert "model refused" in records[0].error
 
 
-@pytest.mark.asyncio
 async def test_read_translates_agent_run_error_to_failed_record():
     gateway = _bare_gateway()
     gateway._fetch_agent = _RaisingAgent()
@@ -123,7 +121,6 @@ class _EmptyAgent:
         return SimpleNamespace(output="", new_messages=lambda: [])
 
 
-@pytest.mark.asyncio
 async def test_read_returns_failed_record_when_no_content_returned():
     gateway = _bare_gateway()
     gateway._fetch_agent = _EmptyAgent()

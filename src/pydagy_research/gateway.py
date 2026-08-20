@@ -46,6 +46,27 @@ def _normalize(value: str) -> str:
     return " ".join(value.strip().lower().split())
 
 
+_antigravity_types_module: Any = None
+
+
+def _antigravity_types() -> Any:
+    """Lazily imports and memoizes `google.antigravity.types` at module scope.
+
+    Deliberately NOT cached on a gateway instance attribute: `Agent.__init__`
+    deep-copies the whole `AgentConfig` it's given (including the `hooks`
+    list), and our hooks are bound methods of the gateway — so anything
+    reachable from `self` must stay deepcopy-safe. A live module object is
+    not (`TypeError: cannot pickle 'module' object`); a module-level global
+    sidesteps that entirely.
+    """
+    global _antigravity_types_module
+    if _antigravity_types_module is None:
+        from google.antigravity import types as _types
+
+        _antigravity_types_module = _types
+    return _antigravity_types_module
+
+
 class RetrievalGateway(Protocol):
     """Backend-agnostic retrieval interface (PLAN.md §1)."""
 
@@ -116,8 +137,6 @@ class AntigravitySDKGateway:
         from google.antigravity import Agent, LocalAgentConfig, types
         from google.antigravity.hooks import hooks, policy
 
-        self._ga_types = types
-
         budget_config = self._budget_config or types.BudgetConfig(
             max_tool_calls=12, max_model_calls=10
         )
@@ -178,7 +197,7 @@ class AntigravitySDKGateway:
 
     async def _run_turn(self, *, action: str, value: str, prompt: str) -> list[EvidenceRecord]:
         assert self._agent is not None, "AntigravitySDKGateway must be used as `async with gateway:`"
-        types = self._ga_types
+        types = _antigravity_types()
         self._expected_action = action
         self._expected_value = value
         self._turn_records = []
@@ -222,7 +241,7 @@ class AntigravitySDKGateway:
         )
 
     async def _pre_tool_call(self, data: Any) -> Any:
-        types = self._ga_types
+        types = _antigravity_types()
         if data.id and data.name in (
             types.BuiltinTools.SEARCH_WEB.value,
             types.BuiltinTools.READ_URL_CONTENT.value,
@@ -232,7 +251,7 @@ class AntigravitySDKGateway:
 
     async def _post_tool_call(self, data: Any) -> None:
         """Extracts `EvidenceRecord`s from tool results (PLAN.md §2) and flags drift."""
-        types = self._ga_types
+        types = _antigravity_types()
         from google.antigravity.connections.local import types as local_types
 
         args = self._pending_call_args.pop(data.id, {}) if data.id else {}
