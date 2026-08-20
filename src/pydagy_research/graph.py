@@ -184,9 +184,23 @@ def build_graph() -> Graph[PipelineState, PipelineDeps, None, ResearchAnswer]:
     return g.build()
 
 
-def default_deps(model: Any) -> PipelineDeps:
-    """Convenience: build `PipelineDeps` with real Planner/Writer agents on `model`."""
+def default_deps(model: Any, *, use_headless_browser: bool = False) -> PipelineDeps:
+    """Convenience: build `PipelineDeps` with real Planner/Writer agents on `model`.
+
+    `use_headless_browser=True` wraps whichever backend `retrieval_backend`
+    selects with `BrowserAugmentedGateway` (requires the `browser` extra —
+    see browser_gateway.py), so `.read()` renders JavaScript-heavy pages
+    with real Chromium instead of a static HTML fetch.
+    """
+    gateway_factory: Callable[[ResearchPlan], RetrievalGateway] = make_gateway
+    if use_headless_browser:
+        from .browser_gateway import BrowserAugmentedGateway
+
+        def gateway_factory(plan: ResearchPlan) -> RetrievalGateway:
+            return BrowserAugmentedGateway(make_gateway(plan))
+
     return PipelineDeps(
         planner_agent=build_planner_agent(model),
         writer_agent=build_writer_agent(model),
+        gateway_factory=gateway_factory,
     )

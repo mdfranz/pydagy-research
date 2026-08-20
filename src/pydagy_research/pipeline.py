@@ -15,6 +15,7 @@ async def run_research(
     *,
     model: Any = None,
     retrieval_backend: RetrievalBackend = "antigravity",
+    use_headless_browser: bool = False,
     deps: PipelineDeps | None = None,
 ) -> ResearchAnswer:
     """Runs the full research pipeline (PLAN.md §6) end-to-end for `question`.
@@ -27,14 +28,22 @@ async def run_research(
         retrieval_backend: Which `RetrievalGateway` backend to use — the
             default Antigravity SDK gateway, or the `pydantic_native`
             `WebSearch`/`WebFetch` gateway (PLAN.md §1).
+        use_headless_browser: Wrap the selected backend with
+            `BrowserAugmentedGateway` (see browser_gateway.py) so `.read()`
+            renders JavaScript-heavy pages with real Chromium instead of a
+            static HTML fetch. Requires the `browser` extra. Ignored if
+            `deps` is supplied.
         deps: Pre-built `PipelineDeps` (agents + gateway factory), for tests
             that need full control over every collaborator. When omitted,
-            `default_deps(model)` builds real Planner/Writer agents.
+            `default_deps(model, use_headless_browser=use_headless_browser)`
+            builds real Planner/Writer agents.
 
     Returns:
         The validated, grounded `ResearchAnswer`.
     """
     graph = build_graph()
     state = PipelineState(question=question, retrieval_backend=retrieval_backend)
-    resolved_deps = deps if deps is not None else default_deps(model)
+    resolved_deps = (
+        deps if deps is not None else default_deps(model, use_headless_browser=use_headless_browser)
+    )
     return await graph.run(state=state, deps=resolved_deps)

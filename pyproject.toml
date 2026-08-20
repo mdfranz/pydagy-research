@@ -20,6 +20,9 @@ pydagy-research = "pydagy_research:main"
 antigravity = [
     "google-antigravity>=0.1.13",
 ]
+browser = [
+    "playwright>=1.62.0",
+]
 
 [build-system]
 requires = ["uv_build>=0.12.5,<0.13.0"]
