@@ -234,3 +234,22 @@ def test_default_deps_gateway_factory_threads_model_into_pydantic_native_only():
     antigravity_gateway = deps.gateway_factory(antigravity_plan)
     assert isinstance(antigravity_gateway, AntigravitySDKGateway)
     assert antigravity_gateway._model is None
+
+
+def test_default_deps_threads_enable_otel_tracing_into_antigravity_backend_only():
+    """enable_otel_tracing is meaningful only for AntigravitySDKGateway --
+
+    PydanticNativeSearchGateway is already covered by logfire.instrument_
+    pydantic_ai() (tracing.py), so it must not be passed there (it isn't a
+    constructor kwarg PydanticNativeSearchGateway accepts).
+    """
+    deps = default_deps(TestModel(), enable_otel_tracing=True)
+
+    antigravity_plan = ResearchPlan(question="q", retrieval_backend="antigravity", requests=[])
+    antigravity_gateway = deps.gateway_factory(antigravity_plan)
+    assert isinstance(antigravity_gateway, AntigravitySDKGateway)
+    assert antigravity_gateway._enable_otel is True
+
+    native_plan = ResearchPlan(question="q", retrieval_backend="pydantic_native", requests=[])
+    native_gateway = deps.gateway_factory(native_plan)
+    assert isinstance(native_gateway, PydanticNativeSearchGateway)

@@ -111,6 +111,16 @@ class AntigravitySDKGateway:
 
         async with AntigravitySDKGateway() as gateway:
             records = await run_plan(gateway, plan)
+
+    `enable_otel=True` additionally registers the SDK's own
+    `google.antigravity.utils.otel.get_otel_hooks()` — standard
+    OpenTelemetry spans for the session/turn/tool-call lifecycle inside
+    `localharness`, which `logfire.instrument_pydantic_ai()` (tracing.py)
+    cannot see since this backend never uses a `pydantic_ai.Agent`. Once
+    `logfire.configure()` has run, these spans land in the same trace
+    automatically — they're emitted via the global OTel tracer, and
+    `logfire.configure()` registers itself as that global provider — no
+    separate exporter wiring needed.
     """
 
     def __init__(
@@ -119,10 +129,12 @@ class AntigravitySDKGateway:
         model: Any | None = None,
         budget_config: Any | None = None,
         agent_config_kwargs: dict[str, Any] | None = None,
+        enable_otel: bool = False,
     ) -> None:
         self._model = model
         self._budget_config = budget_config
         self._agent_config_kwargs = dict(agent_config_kwargs or {})
+        self._enable_otel = enable_otel
         self._agent: Any | None = None
         self._agent_cm: Any | None = None
         # id (ToolCall.id) -> args, captured by the pre-tool-call hook so the
@@ -154,8 +166,7 @@ class AntigravitySDKGateway:
             policy.allow(types.BuiltinTools.VIEW_FILE.value),
         ]
 
-        pre_hook = hooks.pre_tool_call_decide(self._pre_tool_call)
-        post_hook = hooks.post_tool_call(self._post_tool_call)
+        all_hooks = self._build_hooks(hooks)
 
         config_kwargs: dict[str, Any] = dict(self._agent_config_kwargs)
         if self._model is not None:
@@ -163,7 +174,7 @@ class AntigravitySDKGateway:
         config = LocalAgentConfig(
             capabilities=capabilities,
             policies=policies,
-            hooks=[pre_hook, post_hook],
+            hooks=all_hooks,
             budget_config=budget_config,
             **config_kwargs,
         )
@@ -194,6 +205,28 @@ class AntigravitySDKGateway:
         return self._missing_call_record(action="read", value=url)
 
     # -- internals -----------------------------------------------------------
+
+    def _build_hooks(self, hooks_module: Any) -> list[Any]:
+        """Builds the hooks list passed to `LocalAgentConfig` (split out for testability).
+
+        `hooks_module` is `google.antigravity.hooks.hooks`, passed in from
+        `__aenter__` (it's imported lazily there since the SDK is an
+        optional dependency).
+        """
+        pre_hook = hooks_module.pre_tool_call_decide(self._pre_tool_call)
+        post_hook = hooks_module.post_tool_call(self._post_tool_call)
+        all_hooks = [pre_hook, post_hook]
+        if self._enable_otel:
+            from google.antigravity.utils import otel as otel_hooks
+
+            # Independent hook sets on the same hook types (pre_tool_call_decide,
+            # post_tool_call, ...): HookRunner dispatches every registered hook
+            # of a given type each time, so the SDK's span-management hooks and
+            # our own evidence-extraction hooks coexist without interfering
+            # with each other (verified against hook_runner.py's dispatch_*
+            # methods, which just loop over the registered list).
+            all_hooks = all_hooks + otel_hooks.get_otel_hooks()
+        return all_hooks
 
     async def _run_turn(self, *, action: str, value: str, prompt: str) -> list[EvidenceRecord]:
         assert self._agent is not None, "AntigravitySDKGateway must be used as `async with gateway:`"

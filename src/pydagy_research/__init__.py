@@ -88,8 +88,9 @@ def main() -> None:
     log_path = configure_file_logging()
     print(f"(logging to {log_path})", file=sys.stderr)
 
-    if configure_tracing():
-        print("(logfire tracing enabled)", file=sys.stderr)
+    tracing_enabled = configure_tracing()
+    if tracing_enabled:
+        print("(logfire tracing enabled, including the Antigravity SDK's own spans)", file=sys.stderr)
 
     question = " ".join(args.question) or "What is the latest stable Python release?"
     answer = asyncio.run(
@@ -98,6 +99,7 @@ def main() -> None:
             model=args.model,
             retrieval_backend=args.backend,
             use_headless_browser=args.browser,
+            enable_otel_tracing=tracing_enabled,
         )
     )
     print(answer.model_dump_json(indent=2))

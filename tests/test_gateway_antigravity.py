@@ -192,10 +192,35 @@ def test_hooks_survive_agent_config_deepcopy():
     gateway.py for why a module reference must never live on `self`).
     """
     gateway = _gateway()
-    pre_hook = ga_hooks.pre_tool_call_decide(gateway._pre_tool_call)
-    post_hook = ga_hooks.post_tool_call(gateway._post_tool_call)
-    config = LocalAgentConfig(hooks=[pre_hook, post_hook])
+    config = LocalAgentConfig(hooks=gateway._build_hooks(ga_hooks))
 
+    config.model_copy(deep=True)  # must not raise
+
+
+def test_build_hooks_omits_otel_hooks_by_default():
+    gateway = AntigravitySDKGateway()
+    all_hooks = gateway._build_hooks(ga_hooks)
+    assert len(all_hooks) == 2  # just our pre/post drift-check hooks
+
+
+def test_build_hooks_adds_sdk_otel_hooks_when_enabled():
+    """enable_otel=True registers google.antigravity.utils.otel.get_otel_hooks()
+
+    (session/turn/step/tool-call span hooks) alongside our own, and the
+    combined list must still survive Agent.__init__'s config deepcopy --
+    same failure class as test_hooks_survive_agent_config_deepcopy above,
+    now with 9 additional hook objects mixed in.
+    """
+    from google.antigravity.utils import otel as otel_hooks
+
+    gateway = AntigravitySDKGateway(enable_otel=True)
+    all_hooks = gateway._build_hooks(ga_hooks)
+
+    assert len(all_hooks) == 2 + len(otel_hooks.get_otel_hooks())
+    assert any(isinstance(h, otel_hooks.OTelSessionStartHook) for h in all_hooks)
+    assert any(isinstance(h, otel_hooks.OTelPostToolCallHook) for h in all_hooks)
+
+    config = LocalAgentConfig(hooks=all_hooks)
     config.model_copy(deep=True)  # must not raise
 
 

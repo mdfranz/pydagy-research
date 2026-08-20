@@ -184,13 +184,23 @@ def build_graph() -> Graph[PipelineState, PipelineDeps, None, ResearchAnswer]:
     return g.build()
 
 
-def default_deps(model: Any, *, use_headless_browser: bool = False) -> PipelineDeps:
+def default_deps(
+    model: Any, *, use_headless_browser: bool = False, enable_otel_tracing: bool = False
+) -> PipelineDeps:
     """Convenience: build `PipelineDeps` with real Planner/Writer agents on `model`.
 
     `use_headless_browser=True` wraps whichever backend `retrieval_backend`
     selects with `BrowserAugmentedGateway` (requires the `browser` extra —
     see browser_gateway.py), so `.read()` renders JavaScript-heavy pages
     with real Chromium instead of a static HTML fetch.
+
+    `enable_otel_tracing=True` additionally instruments the Antigravity
+    backend's own session/tool-call lifecycle with the SDK's built-in OTel
+    hooks (irrelevant for `pydantic_native`, which `logfire.instrument_
+    pydantic_ai()` already covers — see tracing.py). Typically passed
+    through from `tracing.configure_tracing()`'s return value rather than
+    set independently, so tracing the Antigravity subprocess just follows
+    from `LOGFIRE_TOKEN` being set.
     """
 
     def gateway_factory(plan: ResearchPlan) -> RetrievalGateway:
@@ -205,7 +215,7 @@ def default_deps(model: Any, *, use_headless_browser: bool = False) -> PipelineD
         if plan.retrieval_backend == "pydantic_native":
             gateway = make_gateway(plan, model=model)
         else:
-            gateway = make_gateway(plan)
+            gateway = make_gateway(plan, enable_otel=enable_otel_tracing)
         if use_headless_browser:
             from .browser_gateway import BrowserAugmentedGateway
 

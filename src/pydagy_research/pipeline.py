@@ -16,6 +16,7 @@ async def run_research(
     model: Any = None,
     retrieval_backend: RetrievalBackend = "antigravity",
     use_headless_browser: bool = False,
+    enable_otel_tracing: bool = False,
     deps: PipelineDeps | None = None,
 ) -> ResearchAnswer:
     """Runs the full research pipeline (PLAN.md §6) end-to-end for `question`.
@@ -33,9 +34,14 @@ async def run_research(
             renders JavaScript-heavy pages with real Chromium instead of a
             static HTML fetch. Requires the `browser` extra. Ignored if
             `deps` is supplied.
+        enable_otel_tracing: Instrument the Antigravity backend's own
+            session/tool-call lifecycle with its built-in OTel hooks (see
+            tracing.py) — pass `configure_tracing()`'s return value here to
+            trace it whenever `LOGFIRE_TOKEN` is set. Ignored if `deps` is
+            supplied.
         deps: Pre-built `PipelineDeps` (agents + gateway factory), for tests
             that need full control over every collaborator. When omitted,
-            `default_deps(model, use_headless_browser=use_headless_browser)`
+            `default_deps(model, use_headless_browser=..., enable_otel_tracing=...)`
             builds real Planner/Writer agents.
 
     Returns:
@@ -44,6 +50,10 @@ async def run_research(
     graph = build_graph()
     state = PipelineState(question=question, retrieval_backend=retrieval_backend)
     resolved_deps = (
-        deps if deps is not None else default_deps(model, use_headless_browser=use_headless_browser)
+        deps
+        if deps is not None
+        else default_deps(
+            model, use_headless_browser=use_headless_browser, enable_otel_tracing=enable_otel_tracing
+        )
     )
     return await graph.run(state=state, deps=resolved_deps)
