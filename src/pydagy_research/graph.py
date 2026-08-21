@@ -268,7 +268,7 @@ def default_deps(
     from `LOGFIRE_TOKEN` being set.
     """
 
-    def gateway_factory(plan: ResearchPlan) -> RetrievalGateway:
+    def gateway_factory(plan: ResearchPlan, telemetry_recorder=None, **kwargs) -> RetrievalGateway:
         # PydanticNativeSearchGateway wraps a pydantic_ai.Agent and, unlike
         # AntigravitySDKGateway (which resolves its own model via
         # LocalAgentConfig/ADC/env when none is given), has no default model
@@ -278,13 +278,13 @@ def default_deps(
         # pydantic_ai's provider-prefixed ones), so it must NOT get `model`
         # here -- pass nothing and let it resolve its own default.
         if plan.retrieval_backend == "pydantic_native":
-            gateway = make_gateway(plan, model=model)
+            gateway = make_gateway(plan, model=model, telemetry_recorder=telemetry_recorder)
         else:
-            gateway = make_gateway(plan, enable_otel=enable_otel_tracing)
+            gateway = make_gateway(plan, enable_otel=enable_otel_tracing, telemetry_recorder=telemetry_recorder)
         if use_headless_browser:
             from .browser_gateway import BrowserAugmentedGateway
 
-            gateway = BrowserAugmentedGateway(gateway)
+            gateway = BrowserAugmentedGateway(gateway, telemetry_recorder=telemetry_recorder)
         return gateway
 
     return PipelineDeps(
