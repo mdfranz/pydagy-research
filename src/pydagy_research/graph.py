@@ -61,12 +61,17 @@ class PipelineDeps:
     `gateway_factory` defaults to `make_gateway` (PLAN.md §1's
     `retrieval_backend`-keyed selection) but is overridable so tests can
     inject a fake `RetrievalGateway` without touching either SDK.
+
+    `enable_telemetry_emission` controls whether TelemetryRecorder emits
+    spans to Logfire (MULTI-PROVIDER-PLAN.md §5.1). Pass the return value
+    of `configure_tracing()` to enable when LOGFIRE_TOKEN is set.
     """
 
     planner_agent: Any
     writer_agent: Any
     gateway_factory: Callable[[ResearchPlan], RetrievalGateway] = make_gateway
     max_write_attempts: int = 2
+    enable_telemetry_emission: bool = False
 
 
 @dataclass
@@ -94,7 +99,11 @@ class RetrievalNode(BaseNode[PipelineState, PipelineDeps]):
         assert ctx.state.plan is not None, "PlannerNode must run before RetrievalNode"
 
         # Create telemetry recorder for this retrieval run
-        recorder = TelemetryRecorder()
+        # Enable Logfire emission if tracing is configured (LOGFIRE_TOKEN set)
+        from .telemetry import TelemetryEmitter
+
+        emitter = TelemetryEmitter(enabled=ctx.deps.enable_telemetry_emission)
+        recorder = TelemetryRecorder(emitter=emitter)
 
         # Pass recorder to gateway factory so it can emit attempt spans
         gateway = ctx.deps.gateway_factory(ctx.state.plan, telemetry_recorder=recorder)
@@ -282,4 +291,5 @@ def default_deps(
         planner_agent=build_planner_agent(model),
         writer_agent=build_writer_agent(model),
         gateway_factory=gateway_factory,
+        enable_telemetry_emission=enable_otel_tracing,
     )
