@@ -120,6 +120,12 @@ def main() -> None:
             "--model-map anthropic=anthropic:claude-opus-5"
         ),
     )
+    parser.add_argument(
+        "--output",
+        choices=["json", "markdown"],
+        default="markdown",
+        help="Output format: markdown (default) or json.",
+    )
     args = parser.parse_args()
 
     # Parse multi-provider arguments
@@ -158,4 +164,7 @@ def main() -> None:
             model_map=model_map,
         )
     )
-    print(report.model_dump_json(indent=2))
+    from .report_formatter import format_report
+
+    output = format_report(report, format=args.output)
+    print(output)
