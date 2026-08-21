@@ -13,6 +13,14 @@ from .models import (
     validate_research_answer,
 )
 from .pipeline import run_research
+from .telemetry import (
+    ExperimentContext,
+    RetrievalRequestTelemetry,
+    SourceAttempt,
+    TelemetryEmitter,
+    TelemetryRecorder,
+    ValidationSummary,
+)
 
 __all__ = [
     "BrowserAugmentedGateway",
@@ -32,6 +40,12 @@ __all__ = [
     "SearchOrFetchRequest",
     "validate_research_answer",
     "run_research",
+    "ExperimentContext",
+    "RetrievalRequestTelemetry",
+    "SourceAttempt",
+    "TelemetryEmitter",
+    "TelemetryRecorder",
+    "ValidationSummary",
     "main",
 ]
 

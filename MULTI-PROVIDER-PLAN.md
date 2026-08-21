@@ -7,7 +7,12 @@ artifact for unsuccessful sources — and a concrete opening once we checked
 actual provider capabilities: Gemini and Anthropic both support native
 `WebSearch` *and* `WebFetch`; OpenAI and OpenRouter only support
 `WebSearch`. That symmetry is the foundation this design is built on, not
-an assumption.
+an assumption. The design has since been revised against the nine research
+pipeline traces currently available in Logfire (2026-08-20) and an exhaustive
+review of the repository's logging call sites. Those traces validate some of
+the motivation below, but they do **not** yet test Gemini against Anthropic;
+that remains an experiment this design must run before treating provider
+independence as established.
 
 See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the current as-built system
 this extends, and [`FINDINGS.md`](FINDINGS.md) for the empirical results
@@ -38,10 +43,53 @@ threshold) this design reuses rather than re-derives.
 | OpenAI | yes | **no** (`supported_native_tools()` = `{WebSearchTool}` only) |
 | OpenRouter | yes (its own "Beta web-search", not necessarily the same index) | **no** |
 
-  Gemini and Anthropic being *fully* symmetric is what makes a genuine
-  multi-provider design worth building — it's not "one good provider plus
-  degraded fallbacks," it's two independently-capable retrieval paths with
-  different underlying search indices and fetch implementations.
+  Gemini and Anthropic being capability-symmetric is what makes a genuine
+  multi-provider design worth testing — it is not structurally "one good
+  provider plus degraded fallbacks." Whether their retrieval paths are
+  independent enough in practice, and whether that difference improves the
+  Writer's evidence, is the empirical question in §8 rather than a fact
+  inferred from the capability matrix.
+
+### 1.1 What the Logfire review actually establishes
+
+The current telemetry contains nine complete `research_pipeline` traces:
+two Python-release smoke runs and paired or repeated LangChain/Agno,
+Firefox/Chrome, and nginx/Apache comparisons. Its conclusions are narrower
+than the provider capability matrix:
+
+- **Browser-first is validated.** In the comparison runs, the Writer received
+  two or three `page_content` records while the traces contained no
+  `native_fetch_agent` spans and, except for one earlier Python smoke run, no
+  Antigravity `read_url_content` spans. Successful Chromium renders bypassed
+  both model-mediated read paths exactly as intended. The same rendered page
+  content reached the Writer regardless of which search backend was selected.
+- **Retrieval dominates wall time.** Across the nine runs, the graph averaged
+  52.0 seconds: Retrieval averaged 40.3 seconds, versus 5.0 seconds for the
+  Planner and 6.6 seconds for the Writer. Optimizing retrieval concurrency and
+  avoiding unnecessary provider calls therefore matters materially.
+- **The existing backend comparison is not a provider-independence test.** All
+  visible `pydantic_native` retrieval calls used `gemini-3.7-flash`; the
+  existing Antigravity path also uses Gemini/Google retrieval. Their search
+  summaries overlap substantially, which is consistent with the same-index
+  hypothesis, but the generated search queries varied between runs. There are
+  no Anthropic or OpenAI retrieval traces.
+- **Current cost telemetry is not comparable across backends.** Pydantic AI
+  token and cost metrics include `pydantic_native` search agents. Antigravity's
+  OTel spans expose its lifecycle and timing but do not contribute equivalent
+  model token/cost totals to the root graph span. Apparent native-versus-
+  Antigravity cost differences are therefore instrumentation differences, not
+  reliable provider-cost measurements.
+- **The final Writer input is observable, but evidence provenance is not.** A
+  Writer span shows the post-validation evidence pool. It does not say which
+  raw records were rejected, why they were rejected, which extraction path
+  produced a surviving record, or whether a successful browser render avoided
+  a provider call.
+
+The next live comparison must therefore use a fixed `ResearchPlan` (or at
+minimum a stable experiment id and plan hash) and run the same exact queries
+through Gemini and Anthropic. Re-running the Planner for each backend is not a
+controlled provider comparison because planner nondeterminism changes the
+workload before retrieval begins.
 
 ## 2. Goals and explicit non-goals
 
@@ -82,14 +130,14 @@ classDiagram
     class RetrievalGateway {
         <<protocol>>
         +search(query, domain) list~EvidenceRecord~
-        +read(url) EvidenceRecord
+        +read(url) list~EvidenceRecord~
     }
     class MultiProviderGateway {
         -gateways : dict~str, RetrievalGateway~
         -read_capable : set~str~
         -attempts : list~SourceAttempt~
         +search(query, domain) list~EvidenceRecord~
-        +read(url) EvidenceRecord
+        +read(url) list~EvidenceRecord~
     }
     RetrievalGateway <|.. MultiProviderGateway
     MultiProviderGateway o-- RetrievalGateway : fans out to N
@@ -114,14 +162,16 @@ MultiProviderGateway({
   or one logical search naturally producing several.
 - **`read(url)`** fans out only to gateways marked `read_capable` (OpenAI
   excluded per §1's matrix, unless configured with a `WebFetch(local=True)`
-  fallback — see §6), picks the richest successful result as the returned
-  `EvidenceRecord` (reusing the existing `_MIN_USEFUL_READ_CHARS`
-  threshold, generalized out of `AntigravitySDKGateway` into a shared
-  utility rather than duplicated), and records every attempt — winning or
-  not — into `self.attempts` (§5).
-- `.search()`/`.read()` both still return the same types the protocol
-  already promises; nothing about the existing single-provider gateways or
-  `BrowserAugmentedGateway` needs to change to keep working.
+  fallback — see §6), and returns **every successful provider record**, tagged
+  by provider. It records successful, thin, failed, and excluded attempts in
+  `self.attempts` (§5). It may compute a `richest` marker for presentation or
+  ordering, but must not discard the other providers' text.
+- This requires one deliberate protocol generalization: `read()` changes from
+  `EvidenceRecord` to `list[EvidenceRecord]`. Existing single-provider
+  gateways and a successful `BrowserAugmentedGateway` return singleton lists;
+  `run_plan()` extends its result for both actions instead of appending reads.
+  Without this change, the Writer cannot perform the corroboration promised in
+  §2: `SourceAttempt` carries metadata, not the losing provider's extract.
 
 ### 3.1 One `read()` call, fanned out
 
@@ -140,8 +190,8 @@ sequenceDiagram
         MP->>A: read(url)
         A-->>MP: EvidenceRecord (rich or thin)
     end
-    MP->>MP: pick richest as the returned record<br/>log both as SourceAttempts
-    MP-->>R: EvidenceRecord (winner)
+    MP->>MP: retain both successful records<br/>log every SourceAttempt
+    MP-->>R: list[EvidenceRecord]
 ```
 
 ## 4. Evidence model changes
@@ -169,35 +219,89 @@ class SourceAttempt(BaseModel):
     evidence_id: str | None  # set if this attempt made it into evidence_pool
     status: Literal["success", "failed"]
     char_count: int          # len(raw_extract) at the time of the attempt
+    duration_ms: float
+    extraction_method: Literal[
+        "browser", "native_tool", "antigravity_tool", "local_fetch",
+        "response_text_fallback", "unknown"
+    ]
     note: str                 # e.g. "below 80-char threshold", "drift: requested X, got Y"
     timestamp: datetime
 ```
 
 | Tier | Meaning |
 |---|---|
-| `verified` | `page_content`, above the thinness threshold, made it into the evidence pool |
-| `thin` | `page_content`, but below threshold (or only reached via a fallback like the response-text one) — still technically citable, worth flagging as lower-confidence |
+| `verified` | Structurally citable `page_content`, above the thinness threshold, made it into the evidence pool; this does not assert semantic completeness or factual correctness |
+| `thin` | `page_content` still below the threshold after all available fallbacks — technically citable under the current grounding contract, but explicitly lower-confidence |
 | `triage_only` | `search_summary` — informed the Writer's context, never citable |
 | `excluded` | failed or drift-flagged — attempted, unusable, currently invisible everywhere except log files |
 
-This isn't exclusive to multi-provider — a single-provider run has exactly
-one attempt per request and one tier per attempt, so the schema degrades
-cleanly. But multi-provider fan-out is what makes it *valuable*: a
-single-provider `read()` failing has no interesting attempt-level story to
-tell (there was one attempt, it's already the `EvidenceRecord` or the
-`_missing_call_record`); a 2-3-provider fan-out has a real story (which
-providers got real content, which didn't, was there a drift flag on one
-but not the other).
+`extraction_method` is separate from `tier`: a rich response-text fallback is
+not automatically thin merely because of how it was obtained. Likewise,
+`char_count` is a diagnostic rather than proof of semantic sufficiency. The
+Python-release traces produced successful page content but still lacked the
+specific version needed to answer the question; the Writer correctly surfaced
+that limitation despite the record passing structural validation.
 
-**Where it lives:** `MultiProviderGateway` accumulates `self.attempts`
-internally as it fans out. `RetrievalNode` reads it duck-typed
-(`getattr(gateway, "attempts", [])`) into a new `PipelineState.source_attempts`
-field — existing single-provider gateways need zero changes; they simply
-don't have an `attempts` attribute, and the pipeline treats that as "no
-attempt log available," not an error.
+This is not exclusive to multi-provider. A single-provider run has exactly one
+attempt per request and one tier per attempt, and the telemetry review shows
+that its fallback and exclusion story is still operationally important.
+Multi-provider fan-out makes the artifact richer rather than making it useful
+for the first time.
 
-**Output shape — a real decision point, not yet resolved:** exposing this
-means `run_research()`'s return type needs to grow. Two options:
+**Where it lives:** every gateway accumulates `self.attempts`; the
+`MultiProviderGateway` combines the child attempts as it fans out.
+`RetrievalNode` copies them into a new `PipelineState.source_attempts` field.
+Making this part of the gateway contract avoids a silent split where only new
+multi-provider runs are diagnosable and existing single-provider runs retain
+today's gaps.
+
+### 5.1 Current observability gaps and required trace shape
+
+Excluding tracing initialization and third-party SDK chatter, an exhaustive
+call-site review found exactly six retrieval/pipeline diagnostic events emitted
+by the application to Python logging rather than structured attempt spans:
+
+1. Antigravity turn failure (SDK exception).
+2. The Antigravity response-text fallback firing.
+3. `pydantic_native` turn failure.
+4. Writer grounding-validation retry/failure.
+5. Browser render failure.
+6. Browser render producing empty text.
+
+These are plain log messages rather than a consistent structured attempt
+schema. Four important paths are completely silent:
+
+- `ValidatorNode` filtering and deduplication: no counts or reasons for
+  failed, drift-flagged, or duplicate records being removed.
+- Drift detection at the moment `drift_flagged=True` is set, despite a drift
+  false-positive having caused a live bug (`FINDINGS.md` §1.2).
+- Successful browser renders: no success event, duration, content length, or
+  explicit indication that the provider read was bypassed.
+- `PipelineState`: raw evidence, the evidence pool, attempts, and tier data are
+  unavailable through the normal `run_research()` API, which returns only the
+  final `ResearchAnswer`.
+
+Before multi-provider behavior is added, emit one parent retrieval span per
+logical request and one child attempt span per browser/provider attempt. Use
+stable, queryable attributes rather than requiring prompt inspection:
+
+- run/experiment: `experiment_id`, `scenario`, `plan_hash`, configured
+  backend(s), model(s), and `browser_enabled`;
+- request: `request_id`, `action`, normalized query or URL, and fan-out size;
+- attempt: `provider`, `model`, `status`, `duration_ms`, `char_count`,
+  `source_kind`, `tier`, `extraction_method`, `drift_flagged`, and error;
+- validation: raw count, kept count, and counts dropped by failed, drift, and
+  duplicate reason, plus the assigned `evidence_id` where applicable;
+- cost: normalized input/output tokens and provider cost when the provider
+  exposes them, explicitly null/unknown otherwise.
+
+Do not enable full HTTP payload capture by default. The existing structured
+Pydantic AI spans already make prompts and model content available for targeted
+debugging; attempt metadata supplies the missing operational facts without
+expanding secret-bearing payload capture.
+
+**Output shape — resolved recommendation:** exposing this means
+`run_research()`'s return type needs to grow. The two available shapes are:
 1. **Breaking change**: return a new `ResearchReport(answer: ResearchAnswer,
    source_attempts: list[SourceAttempt])` instead of bare `ResearchAnswer`.
    More useful, but changes the public API and the CLI's JSON output shape.
@@ -207,11 +311,13 @@ means `run_research()`'s return type needs to grow. Two options:
    line. Preserves compatibility, but the transparency artifact stays
    half-buried — exactly the problem this section exists to fix.
 
-Recommendation: option 1. This project has iterated on `run_research()`'s
+Recommendation: option 1. The telemetry review makes this more than a product-
+shape preference: `PipelineState` is otherwise inaccessible through the normal
+API, and all prior evidence debugging required ad-hoc scripts against graph
+internals. This project has iterated on `run_research()`'s
 signature repeatedly already (`use_headless_browser`, `enable_otel_tracing`)
 without stability guarantees; a `ResearchReport` wrapper is a small,
 one-time break for a feature that's the whole point of this section.
-Needs confirmation before implementing, not assumed.
 
 ## 6. How this composes with what already exists
 
@@ -249,16 +355,21 @@ flowchart TD
     Read["RetrievalNode: read(url)"] --> Browser{"--browser enabled<br/>and render succeeds?"}
     Browser -- yes --> Canonical["One canonical EvidenceRecord<br/>(host-controlled, zero model cost)"]
     Browser -- "no, or thin" --> MultiP["MultiProviderGateway.read(url)<br/>fan out to N providers"]
-    MultiP --> Pick["richest result -> EvidenceRecord<br/>all attempts -> SourceAttempt log"]
+    MultiP --> Keep["all successful results -> EvidenceRecords<br/>all attempts -> SourceAttempt log"]
 ```
 
 ## 7. Cost and latency, stated plainly
 
 This is not free, and shouldn't be framed as free. A 2-provider fan-out
-roughly doubles model-call cost and latency for every `read()`/`search()`
-that reaches it; 3 providers roughly triples it. `ResearchPlan` already
-caps at 5 requests — a fully-fanned-out plan could mean up to 15 real
-fetch/search calls instead of 5. This should be **opt-in**, the same way
+roughly doubles model-call count and expected model cost for every
+`read()`/`search()` that reaches it; 3 providers roughly triples them.
+Because provider calls for one logical request run concurrently, wall latency
+should approach the slowest provider attempt rather than the sum. It can still
+increase through rate limits, contention, connection setup, retries, or a slow
+tail, so it must be measured rather than promised either way. `ResearchPlan`
+already caps at 5 requests — a fully-fanned-out plan could mean up to 15 real
+fetch/search calls instead of 5, while `run_plan()` still executes the five
+logical requests sequentially. This should be **opt-in**, the same way
 `--browser` and `enable_otel_tracing` are — a `use_multi_provider=` flag
 threaded through `default_deps()`/`run_research()`/the CLI, not a new
 default. §6's browser-first ordering is exactly the mechanism that keeps
@@ -270,24 +381,30 @@ stage and never reach the expensive fan-out at all.
 Following this project's established pattern (build a thin slice, verify
 live, expand — not the whole design in one shot):
 
-1. **`EvidenceRecord.provider` + the `(url, provider)` dedup key change**
-   (§4) — small, additive, unblocks everything else, easy to verify with
-   existing tests plus one new dedup test.
-2. **`MultiProviderGateway.search()` only** — no `read()` fan-out yet, just
-   concurrent multi-provider search tagged by provider. Lowest risk (search
-   results were never deduplicated for richness anyway), and lets us
-   actually check the "do Gemini and Anthropic's search results meaningfully
-   differ" question empirically, which this document has assumed but not
-   yet verified live.
-3. **`SourceAttempt` + `PipelineState.source_attempts`**, populated from
-   whatever `MultiProviderGateway.search()` produced in step 2 — verify the
-   tiering logic on real data before extending it to `read()`.
-4. **`MultiProviderGateway.read()` fan-out**, reusing the generalized
-   thinness-threshold utility from `AntigravitySDKGateway`.
-5. **`ResearchReport` output shape** (§5) — once there's something real to
-   put in `source_attempts`, decide the breaking-vs-non-breaking question
-   for real rather than in the abstract.
-6. Re-run this session's live comparisons (LangChain/Agno, Firefox/Chrome,
+1. **Instrument the current single-provider pipeline first** (§5.1): gateway
+   attempt spans, browser-success spans, drift events, Validator decision
+   counts/reasons, experiment metadata, and normalized cost fields. This gives
+   the next phases a trustworthy baseline.
+2. **Add `SourceAttempt`, `PipelineState.source_attempts`, and
+   `ResearchReport`** (§5) for existing gateways, including extraction method
+   and duration. Verify the tiering logic on current live cases before fan-out.
+3. **Generalize the evidence contract**: add `EvidenceRecord.provider`, change
+   `read()` to return a list, make `run_plan()` extend both actions, and change
+   deduplication to `(url, provider)` (§3–4). Add regression tests proving that
+   two provider reads of the same URL both reach the Writer.
+4. **Run a controlled search experiment before building orchestration**:
+   execute one fixed `ResearchPlan` through Gemini and Anthropic, with exact
+   identical queries and an `experiment_id`/`plan_hash`. Record result overlap,
+   unique useful facts, latency, failures, tokens, and cost. This is the first
+   empirical test of the design's central independence premise.
+5. **Build `MultiProviderGateway.search()`** only after step 4 establishes that
+   the second provider contributes enough independent value to justify its
+   cost. Fan out concurrently, tag every result, and retain all results.
+6. **Build `MultiProviderGateway.read()` fan-out**, retaining every successful
+   provider extract and reusing the generalized thinness-threshold utility
+   from `AntigravitySDKGateway`. Browser success still short-circuits this to
+   one canonical singleton result.
+7. Re-run this session's live comparisons (LangChain/Agno, Firefox/Chrome,
    nginx/Apache) with multi-provider enabled and record whether
    corroboration/tiering actually changed anything, in `FINDINGS.md` —
    same live-verification discipline as every other change in this
