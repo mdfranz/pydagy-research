@@ -2,6 +2,7 @@
 
 from .browser_gateway import BrowserAugmentedGateway
 from .gateway import AntigravitySDKGateway, PydanticNativeSearchGateway, RetrievalGateway, make_gateway
+from .multi_provider_gateway import MultiProviderGateway
 from .graph import PipelineDeps, PipelineState, build_graph, default_deps
 from .models import (
     Citation,
@@ -27,6 +28,7 @@ __all__ = [
     "BrowserAugmentedGateway",
     "AntigravitySDKGateway",
     "PydanticNativeSearchGateway",
+    "MultiProviderGateway",
     "RetrievalGateway",
     "make_gateway",
     "PipelineDeps",
