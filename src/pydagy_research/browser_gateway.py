@@ -31,11 +31,15 @@ package has no hard dependency on it.
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .gateway import RetrievalGateway, _temp_evidence_id
 from .models import EvidenceRecord
+
+if TYPE_CHECKING:
+    from .telemetry import TelemetryRecorder
 
 __all__ = ["BrowserAugmentedGateway"]
 
@@ -64,10 +68,12 @@ class BrowserAugmentedGateway:
         *,
         timeout_s: float = 20.0,
         headless: bool = True,
+        telemetry_recorder: "TelemetryRecorder | None" = None,
     ) -> None:
         self._inner = inner
         self._timeout_s = timeout_s
         self._headless = headless
+        self._telemetry_recorder = telemetry_recorder
         self._playwright_cm: Any | None = None
         self._playwright: Any | None = None
         self._browser: Any | None = None
@@ -101,27 +107,59 @@ class BrowserAugmentedGateway:
 
     async def read(self, url: str) -> list[EvidenceRecord]:
         assert self._browser is not None, "BrowserAugmentedGateway must be used as `async with gateway:`"
+        start_time = time.time()
         try:
             title, text = await self._render(url)
         except Exception as exc:
             _logger.warning("Headless render failed for %s (%s); falling back to inner gateway", url, exc)
+            self._record_browser_attempt(url, success=False, char_count=0, duration_ms=(time.time() - start_time) * 1000)
             return await self._inner.read(url)
 
         if not text.strip():
             _logger.info("Headless render of %s produced no text; falling back to inner gateway", url)
+            self._record_browser_attempt(url, success=False, char_count=0, duration_ms=(time.time() - start_time) * 1000)
             return await self._inner.read(url)
 
+        text_extracted = text[:_MAX_CHARS]
+        self._record_browser_attempt(url, success=True, char_count=len(text_extracted), duration_ms=(time.time() - start_time) * 1000)
         return [
             EvidenceRecord(
                 evidence_id=_temp_evidence_id(),
                 source_url=url,
                 source_kind="page_content",
                 title=title or url,
-                raw_extract=text[:_MAX_CHARS],
+                raw_extract=text_extracted,
                 timestamp=_now(),
                 status="success",
+                provider="browser",
             )
         ]
+
+    def _record_browser_attempt(
+        self, url: str, *, success: bool, char_count: int, duration_ms: float
+    ) -> None:
+        """Record a browser render attempt to telemetry if recorder is configured."""
+        if not hasattr(self, "_telemetry_recorder") or self._telemetry_recorder is None:
+            return
+
+        from .telemetry import SourceAttempt
+        import uuid
+
+        status = "success" if success else "failed"
+        tier = "excluded" if not success else ("thin" if char_count < 80 else "verified")
+
+        attempt = SourceAttempt(
+            request_id=f"br-{uuid.uuid4().hex[:8]}",
+            provider="browser",
+            action="read",
+            query_or_url=url,
+            tier=tier,
+            status=status,
+            char_count=char_count,
+            duration_ms=duration_ms,
+            extraction_method="browser",
+        )
+        self._telemetry_recorder.record_attempt(attempt)
 
     async def _render(self, url: str) -> tuple[str, str]:
         page = await self._browser.new_page()

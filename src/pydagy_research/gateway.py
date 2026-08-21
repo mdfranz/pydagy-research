@@ -16,11 +16,15 @@ so importing this module never requires it to be installed.
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from .models import EvidenceRecord, ResearchPlan, SearchOrFetchRequest
+
+if TYPE_CHECKING:
+    from .telemetry import TelemetryRecorder
 
 __all__ = [
     "RetrievalGateway",
@@ -149,11 +153,13 @@ class AntigravitySDKGateway:
         budget_config: Any | None = None,
         agent_config_kwargs: dict[str, Any] | None = None,
         enable_otel: bool = False,
+        telemetry_recorder: "TelemetryRecorder | None" = None,
     ) -> None:
         self._model = model
         self._budget_config = budget_config
         self._agent_config_kwargs = dict(agent_config_kwargs or {})
         self._enable_otel = enable_otel
+        self._telemetry_recorder = telemetry_recorder
         self._agent: Any | None = None
         self._agent_cm: Any | None = None
         # id (ToolCall.id) -> args, captured by the pre-tool-call hook so the
@@ -162,6 +168,7 @@ class AntigravitySDKGateway:
         self._expected_action: str | None = None
         self._expected_value: str | None = None
         self._turn_records: list[EvidenceRecord] = []
+        self._turn_start_time: float = 0.0
 
     async def __aenter__(self) -> "AntigravitySDKGateway":
         # Imported lazily: google-antigravity is an optional extra.
@@ -262,6 +269,7 @@ class AntigravitySDKGateway:
         self._expected_action = action
         self._expected_value = value
         self._turn_records = []
+        self._turn_start_time = time.time()
         self._pending_call_args.clear()  # defensive: no carry-over if a prior turn errored mid-call
         try:
             response = await self._agent.chat(prompt)
@@ -273,11 +281,59 @@ class AntigravitySDKGateway:
             types.AntigravityValidationError,
         ) as exc:
             _logger.warning("Antigravity gateway turn failed (%s=%r): %s", action, value, exc)
+            self._record_attempt_telemetry(action, value, status="failed", error=str(exc))
             return [self._failed_record(action=action, value=value, error=str(exc))]
 
         if action == "read":
             self._apply_response_text_fallback(response_text)
+
+        # Record telemetry for each record produced
+        for record in self._turn_records:
+            self._record_attempt_telemetry(
+                action,
+                value,
+                status=record.status,
+                char_count=len(record.raw_extract),
+                drift_flagged=record.drift_flagged,
+                error=record.error,
+            )
         return list(self._turn_records)
+
+    def _record_attempt_telemetry(
+        self,
+        action: str,
+        value: str,
+        *,
+        status: str,
+        char_count: int = 0,
+        drift_flagged: bool = False,
+        error: str | None = None,
+    ) -> None:
+        """Record a retrieval attempt to telemetry if recorder is configured."""
+        if not hasattr(self, "_telemetry_recorder") or self._telemetry_recorder is None:
+            return
+
+        from .telemetry import SourceAttempt
+
+        duration_ms = (time.time() - self._turn_start_time) * 1000
+        tier = "excluded" if status != "success" else ("thin" if char_count < 80 else "verified")
+        extraction_method = "antigravity_tool"
+
+        attempt = SourceAttempt(
+            request_id=f"ag-{uuid.uuid4().hex[:8]}",
+            provider="antigravity",
+            action=action,
+            query_or_url=value,
+            tier=tier,
+            status=status,
+            char_count=char_count,
+            duration_ms=duration_ms,
+            extraction_method=extraction_method,
+            model=str(self._model) if self._model else None,
+            drift_flagged=drift_flagged,
+            error=error,
+        )
+        self._telemetry_recorder.record_attempt(attempt)
 
     def _apply_response_text_fallback(self, response_text: str) -> None:
         """Falls back to the model's own final response text when typed extraction came back too thin.
@@ -435,10 +491,13 @@ class PydanticNativeSearchGateway:
         *,
         search_kwargs: dict[str, Any] | None = None,
         fetch_kwargs: dict[str, Any] | None = None,
+        telemetry_recorder: "TelemetryRecorder | None" = None,
     ) -> None:
         from pydantic_ai import Agent as PydanticAgent
         from pydantic_ai.capabilities import WebFetch, WebSearch
 
+        self._model = model
+        self._telemetry_recorder = telemetry_recorder
         self._search_agent: Any = PydanticAgent(
             model, name="native_search_agent", capabilities=[WebSearch(**(search_kwargs or {}))]
         )
@@ -463,6 +522,7 @@ class PydanticNativeSearchGateway:
             source_kind="search_summary",
             fallback_url=f"search:{query}",
             fallback_title=f"Search: {query}",
+            action="search",
         )
         return records
 
@@ -473,9 +533,12 @@ class PydanticNativeSearchGateway:
             source_kind="page_content",
             fallback_url=url,
             fallback_title=url,
+            action="read",
         )
         if records:
             return records
+        # No records returned - record this as a failure
+        self._record_attempt_telemetry("read", url, status="failed", error="no content returned")
         return [
             EvidenceRecord(
                 evidence_id=_temp_evidence_id(),
@@ -497,13 +560,18 @@ class PydanticNativeSearchGateway:
         source_kind: str,
         fallback_url: str,
         fallback_title: str,
+        action: str,
     ) -> list[EvidenceRecord]:
         from pydantic_ai.exceptions import AgentRunError
 
+        start_time = time.time()
         try:
             result = await agent.run(prompt)
         except AgentRunError as exc:
             _logger.warning("Native search/fetch turn failed (%s): %s", fallback_url, exc)
+            self._record_attempt_telemetry(
+                action, fallback_url, status="failed", error=str(exc), duration_ms=(time.time() - start_time) * 1000
+            )
             return [
                 EvidenceRecord(
                     evidence_id=_temp_evidence_id(),
@@ -516,9 +584,56 @@ class PydanticNativeSearchGateway:
                     error=str(exc),
                 )
             ]
-        return _extract_native_evidence(
+
+        records = _extract_native_evidence(
             result, source_kind=source_kind, fallback_url=fallback_url, fallback_title=fallback_title
         )
+
+        # Record telemetry for each extracted record
+        for record in records:
+            tier = "excluded" if record.status != "success" else ("thin" if len(record.raw_extract) < 80 else "verified")
+            self._record_attempt_telemetry(
+                action,
+                fallback_url,
+                status=record.status,
+                char_count=len(record.raw_extract),
+                tier=tier,
+                duration_ms=(time.time() - start_time) * 1000,
+            )
+
+        return records
+
+    def _record_attempt_telemetry(
+        self,
+        action: str,
+        query_or_url: str,
+        *,
+        status: str,
+        char_count: int = 0,
+        tier: str = "excluded",
+        duration_ms: float = 0.0,
+        error: str | None = None,
+    ) -> None:
+        """Record a retrieval attempt to telemetry if recorder is configured."""
+        if not hasattr(self, "_telemetry_recorder") or self._telemetry_recorder is None:
+            return
+
+        from .telemetry import SourceAttempt
+
+        attempt = SourceAttempt(
+            request_id=f"pn-{uuid.uuid4().hex[:8]}",
+            provider="pydantic_native",
+            action=action,
+            query_or_url=query_or_url,
+            tier=tier,
+            status=status,
+            char_count=char_count,
+            duration_ms=duration_ms,
+            extraction_method="native_tool",
+            model=str(self._model) if self._model else None,
+            error=error,
+        )
+        self._telemetry_recorder.record_attempt(attempt)
 
 
 
@@ -599,10 +714,12 @@ def _extract_native_evidence(
     ]
 
 
-def make_gateway(plan: ResearchPlan, **kwargs: Any) -> RetrievalGateway:
+def make_gateway(
+    plan: ResearchPlan, telemetry_recorder: "TelemetryRecorder | None" = None, **kwargs: Any
+) -> RetrievalGateway:
     """Instantiates the `RetrievalGateway` selected by `plan.retrieval_backend` (PLAN.md §1)."""
     if plan.retrieval_backend == "antigravity":
-        return AntigravitySDKGateway(**kwargs)
+        return AntigravitySDKGateway(telemetry_recorder=telemetry_recorder, **kwargs)
     if plan.retrieval_backend == "pydantic_native":
-        return PydanticNativeSearchGateway(**kwargs)
+        return PydanticNativeSearchGateway(telemetry_recorder=telemetry_recorder, **kwargs)
     raise ValueError(f"Unknown retrieval_backend: {plan.retrieval_backend!r}")

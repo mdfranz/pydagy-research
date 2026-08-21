@@ -83,7 +83,7 @@ async def test_full_pipeline_success_path(evidence):
     )
     planner_model = TestModel(custom_output_args=planner_plan.model_dump(mode="json"))
 
-    def gateway_factory(plan: ResearchPlan) -> RetrievalGateway:
+    def gateway_factory(plan: ResearchPlan, telemetry_recorder=None, **kwargs) -> RetrievalGateway:
         return _FakeGateway(search_records=[search_record], read_record=page_record)
 
     # First pass: build the graph and peek at the evidence pool the
@@ -140,7 +140,7 @@ async def test_pipeline_degrades_gracefully_when_writer_cannot_ground(evidence):
     )
     planner_model = TestModel(custom_output_args=planner_plan.model_dump(mode="json"))
 
-    def gateway_factory(plan: ResearchPlan) -> RetrievalGateway:
+    def gateway_factory(plan: ResearchPlan, telemetry_recorder=None, **kwargs) -> RetrievalGateway:
         return _FakeGateway(search_records=[search_record], read_record=page_record)
 
     # Writer output cites an evidence_id that does not exist in the pool —

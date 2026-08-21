@@ -20,6 +20,7 @@ from pydantic_graph import BaseNode, End, Graph, GraphBuilder, GraphRunContext, 
 from .agents import WriterDeps, build_planner_agent, build_writer_agent, planner_prompt, writer_prompt
 from .gateway import RetrievalGateway, make_gateway, run_plan
 from .models import EvidenceRecord, ResearchAnswer, ResearchPlan, RetrievalBackend
+from .telemetry import TelemetryRecorder
 
 __all__ = [
     "PipelineState",
@@ -83,13 +84,25 @@ class PlannerNode(BaseNode[PipelineState, PipelineDeps]):
 
 @dataclass
 class RetrievalNode(BaseNode[PipelineState, PipelineDeps]):
-    """2. Retrieval Gateway Node (PLAN.md §6.2): executes the plan sequentially."""
+    """2. Retrieval Gateway Node (PLAN.md §6.2): executes the plan sequentially.
+
+    Wires TelemetryRecorder into the gateway so all retrieval attempts are
+    captured and emitted to Logfire (MULTI-PROVIDER-PLAN.md §5.1).
+    """
 
     async def run(self, ctx: GraphRunContext[PipelineState, PipelineDeps]) -> "ValidatorNode":
         assert ctx.state.plan is not None, "PlannerNode must run before RetrievalNode"
-        gateway = ctx.deps.gateway_factory(ctx.state.plan)
+
+        # Create telemetry recorder for this retrieval run
+        recorder = TelemetryRecorder()
+
+        # Pass recorder to gateway factory so it can emit attempt spans
+        gateway = ctx.deps.gateway_factory(ctx.state.plan, telemetry_recorder=recorder)
         async with gateway:
             ctx.state.raw_evidence = await run_plan(gateway, ctx.state.plan)
+
+        # Carry attempts through pipeline state for ResearchReport
+        ctx.state.source_attempts = recorder.attempts
         return ValidatorNode()
 
 
@@ -142,6 +155,18 @@ class ValidatorNode(BaseNode[PipelineState, PipelineDeps]):
             "dropped_drift": dropped_drift,
             "dropped_duplicate": dropped_duplicate,
         }
+
+        # Emit validation summary to telemetry if available
+        # (TelemetryRecorder is passed to gateways, so we check if we have access via the evidence pool)
+        _logger.info(
+            "Evidence validation: raw=%d, kept=%d, dropped_failed=%d, dropped_drift=%d, dropped_duplicate=%d",
+            len(ctx.state.raw_evidence),
+            len(pool),
+            dropped_failed,
+            dropped_drift,
+            dropped_duplicate,
+        )
+
         return WriterNode()
 
 
