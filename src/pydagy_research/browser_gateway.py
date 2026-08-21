@@ -99,7 +99,7 @@ class BrowserAugmentedGateway:
     async def search(self, query: str, domain: str | None = None) -> list[EvidenceRecord]:
         return await self._inner.search(query, domain)
 
-    async def read(self, url: str) -> EvidenceRecord:
+    async def read(self, url: str) -> list[EvidenceRecord]:
         assert self._browser is not None, "BrowserAugmentedGateway must be used as `async with gateway:`"
         try:
             title, text = await self._render(url)
@@ -111,15 +111,17 @@ class BrowserAugmentedGateway:
             _logger.info("Headless render of %s produced no text; falling back to inner gateway", url)
             return await self._inner.read(url)
 
-        return EvidenceRecord(
-            evidence_id=_temp_evidence_id(),
-            source_url=url,
-            source_kind="page_content",
-            title=title or url,
-            raw_extract=text[:_MAX_CHARS],
-            timestamp=_now(),
-            status="success",
-        )
+        return [
+            EvidenceRecord(
+                evidence_id=_temp_evidence_id(),
+                source_url=url,
+                source_kind="page_content",
+                title=title or url,
+                raw_extract=text[:_MAX_CHARS],
+                timestamp=_now(),
+                status="success",
+            )
+        ]
 
     async def _render(self, url: str) -> tuple[str, str]:
         page = await self._browser.new_page()

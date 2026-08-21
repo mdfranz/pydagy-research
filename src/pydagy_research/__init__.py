@@ -9,6 +9,7 @@ from .models import (
     EvidenceRecord,
     ResearchAnswer,
     ResearchPlan,
+    ResearchReport,
     SearchOrFetchRequest,
     validate_research_answer,
 )
@@ -37,6 +38,7 @@ __all__ = [
     "EvidenceRecord",
     "ResearchAnswer",
     "ResearchPlan",
+    "ResearchReport",
     "SearchOrFetchRequest",
     "validate_research_answer",
     "run_research",
@@ -107,7 +109,7 @@ def main() -> None:
         print("(logfire tracing enabled, including the Antigravity SDK's own spans)", file=sys.stderr)
 
     question = " ".join(args.question) or "What is the latest stable Python release?"
-    answer = asyncio.run(
+    report = asyncio.run(
         run_research(
             question,
             model=args.model,
@@ -116,4 +118,4 @@ def main() -> None:
             enable_otel_tracing=tracing_enabled,
         )
     )
-    print(answer.model_dump_json(indent=2))
+    print(report.model_dump_json(indent=2))

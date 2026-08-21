@@ -21,6 +21,7 @@ __all__ = [
     "Claim",
     "Citation",
     "ResearchAnswer",
+    "ResearchReport",
     "validate_research_answer",
 ]
 
@@ -61,6 +62,9 @@ class EvidenceRecord(BaseModel):
     * "page_content" — a `read_url_content` / `view_file` / native web-fetch
       result. One URL, one clean extract. The only kind the citation
       validator (`validate_research_answer` below) accepts.
+
+    `provider` tags which retrieval backend or model produced this record.
+    Used for multi-provider correlation and transparent fallback tracking.
     """
 
     evidence_id: str
@@ -78,6 +82,7 @@ class EvidenceRecord(BaseModel):
             " SearchOrFetchRequest asked for (PLAN.md 'Known Constraints')."
         ),
     )
+    provider: str | None = None
     error: str | None = None
 
 
@@ -125,6 +130,20 @@ class ResearchAnswer(BaseModel):
                 f" never claimed: {sorted(set(orphan_citations))}"
             )
         return self
+
+
+class ResearchReport(BaseModel):
+    """Complete research result including the answer and operational telemetry.
+
+    This wraps `ResearchAnswer` with source attempt and validation metadata
+    (MULTI-PROVIDER-PLAN.md §5) to provide full transparency into the
+    retrieval pipeline's behavior: which providers were consulted, which
+    attempts succeeded/failed, and why records were filtered by the validator.
+    """
+
+    answer: ResearchAnswer
+    source_attempts: list = Field(default_factory=list)
+    validation_summary: dict | None = None
 
 
 def validate_research_answer(

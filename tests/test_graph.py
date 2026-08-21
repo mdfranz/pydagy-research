@@ -34,9 +34,9 @@ class _FakeGateway:
     async def search(self, query: str, domain: str | None = None) -> list[EvidenceRecord]:
         return list(self._search_records)
 
-    async def read(self, url: str) -> EvidenceRecord:
+    async def read(self, url: str) -> list[EvidenceRecord]:
         assert self._read_record is not None
-        return self._read_record
+        return [self._read_record]
 
 
 def _now() -> datetime:

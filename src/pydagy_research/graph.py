@@ -36,7 +36,11 @@ _logger = logging.getLogger(__name__)
 
 @dataclass
 class PipelineState:
-    """Mutable state threaded through the graph run (PLAN.md §6)."""
+    """Mutable state threaded through the graph run (PLAN.md §6).
+
+    Carries both the research evidence and the operational telemetry from
+    retrieval attempts (MULTI-PROVIDER-PLAN.md §5).
+    """
 
     question: str
     retrieval_backend: RetrievalBackend = "antigravity"
@@ -45,6 +49,8 @@ class PipelineState:
     evidence_pool: dict[str, EvidenceRecord] = field(default_factory=dict)
     write_attempts: int = 0
     validation_errors: list[str] = field(default_factory=list)
+    source_attempts: list = field(default_factory=list)
+    validation_summary: dict | None = None
 
 
 @dataclass
@@ -91,26 +97,51 @@ class RetrievalNode(BaseNode[PipelineState, PipelineDeps]):
 class ValidatorNode(BaseNode[PipelineState, PipelineDeps]):
     """3. Evidence Validator Node (PLAN.md §6.3).
 
-    Normalizes URLs, prunes near-duplicates, assigns stable `EVID-xxx` ids,
-    and filters out failed fetches and drift-flagged records — the Writer
-    Node only ever sees evidence that survived this gate.
+    Normalizes URLs, prunes near-duplicates (deduplicating by (url, provider)
+    to allow multiple independent provider reads of the same URL for
+    corroboration — MULTI-PROVIDER-PLAN.md §4), assigns stable `EVID-xxx`
+    ids, and filters out failed fetches and drift-flagged records — the
+    Writer Node only ever sees evidence that survived this gate.
     """
 
     async def run(self, ctx: GraphRunContext[PipelineState, PipelineDeps]) -> "WriterNode":
         pool: dict[str, EvidenceRecord] = {}
-        seen_urls: set[str] = set()
+        seen_keys: set[tuple[str, str | None]] = set()
+        dropped_failed = 0
+        dropped_drift = 0
+        dropped_duplicate = 0
         next_index = 1
+
         for record in ctx.state.raw_evidence:
-            if record.status != "success" or record.drift_flagged:
+            if record.status != "success":
+                dropped_failed += 1
                 continue
+            if record.drift_flagged:
+                dropped_drift += 1
+                continue
+
             normalized_url = record.source_url.strip().lower()
-            if normalized_url in seen_urls:
+            # Dedup key is (url, provider): same URL from different providers is
+            # a feature (corroboration), not a duplicate. Same URL from same
+            # provider is a duplicate (skip).
+            dedup_key = (normalized_url, record.provider)
+            if dedup_key in seen_keys:
+                dropped_duplicate += 1
                 continue
-            seen_urls.add(normalized_url)
+            seen_keys.add(dedup_key)
+
             stable_id = f"EVID-{next_index:03d}"
             next_index += 1
             pool[stable_id] = record.model_copy(update={"evidence_id": stable_id})
+
         ctx.state.evidence_pool = pool
+        ctx.state.validation_summary = {
+            "raw_count": len(ctx.state.raw_evidence),
+            "kept_count": len(pool),
+            "dropped_failed": dropped_failed,
+            "dropped_drift": dropped_drift,
+            "dropped_duplicate": dropped_duplicate,
+        }
         return WriterNode()
 
 

@@ -78,11 +78,16 @@ def _antigravity_types() -> Any:
 
 
 class RetrievalGateway(Protocol):
-    """Backend-agnostic retrieval interface (PLAN.md §1)."""
+    """Backend-agnostic retrieval interface (PLAN.md §1).
+
+    Both search() and read() return lists to support multi-provider fan-out
+    (MULTI-PROVIDER-PLAN.md §3-4): a single logical request may produce
+    multiple independent records from different backends.
+    """
 
     async def search(self, query: str, domain: str | None = None) -> list[EvidenceRecord]: ...
 
-    async def read(self, url: str) -> EvidenceRecord: ...
+    async def read(self, url: str) -> list[EvidenceRecord]: ...
 
 
 async def run_plan(gateway: RetrievalGateway, plan: ResearchPlan) -> list[EvidenceRecord]:
@@ -91,13 +96,17 @@ async def run_plan(gateway: RetrievalGateway, plan: ResearchPlan) -> list[Eviden
     Requests execute one at a time (PLAN.md §3: one Antigravity session is
     turn-based, not concurrent) regardless of which backend is configured, so
     this helper is backend-agnostic and lives outside both gateway classes.
+
+    Both search() and read() return lists (MULTI-PROVIDER-PLAN.md §3-4):
+    read() may return multiple records from different providers on fan-out,
+    or a singleton list on single-provider backends.
     """
     records: list[EvidenceRecord] = []
     for request in plan.requests:
         if request.action == "search":
             records.extend(await gateway.search(request.query_or_url, request.domain))
         else:
-            records.append(await gateway.read(request.query_or_url))
+            records.extend(await gateway.read(request.query_or_url))
     return records
 
 
@@ -206,7 +215,7 @@ class AntigravitySDKGateway:
         records = await self._run_turn(action="search", value=query, prompt=prompt)
         return records or [self._missing_call_record(action="search", value=query)]
 
-    async def read(self, url: str) -> EvidenceRecord:
+    async def read(self, url: str) -> list[EvidenceRecord]:
         prompt = (
             f"Use the read_url_content tool to read exactly this URL: {url!r}. "
             "If the tool's summary comes back empty or just a few words, that "
@@ -220,8 +229,8 @@ class AntigravitySDKGateway:
         records = await self._run_turn(action="read", value=url, prompt=prompt)
         for record in records:
             if record.source_kind == "page_content":
-                return record
-        return self._missing_call_record(action="read", value=url)
+                return [record]
+        return [self._missing_call_record(action="read", value=url)]
 
     # -- internals -----------------------------------------------------------
 
@@ -457,7 +466,7 @@ class PydanticNativeSearchGateway:
         )
         return records
 
-    async def read(self, url: str) -> EvidenceRecord:
+    async def read(self, url: str) -> list[EvidenceRecord]:
         records = await self._run(
             self._fetch_agent,
             f"Fetch and return the full contents of {url}",
@@ -466,17 +475,19 @@ class PydanticNativeSearchGateway:
             fallback_title=url,
         )
         if records:
-            return records[0]
-        return EvidenceRecord(
-            evidence_id=_temp_evidence_id(),
-            source_url=url,
-            source_kind="page_content",
-            title=url,
-            raw_extract="",
-            timestamp=_now(),
-            status="failed",
-            error="no content returned",
-        )
+            return records
+        return [
+            EvidenceRecord(
+                evidence_id=_temp_evidence_id(),
+                source_url=url,
+                source_kind="page_content",
+                title=url,
+                raw_extract="",
+                timestamp=_now(),
+                status="failed",
+                error="no content returned",
+            )
+        ]
 
     async def _run(
         self,

@@ -112,9 +112,9 @@ class _FakeInnerGateway:
         self.search_calls.append((query, domain))
         return []
 
-    async def read(self, url: str) -> EvidenceRecord:
+    async def read(self, url: str) -> list[EvidenceRecord]:
         self.read_calls.append(url)
-        return self.fallback_record
+        return [self.fallback_record]
 
 
 @pytest.mark.asyncio
@@ -124,8 +124,10 @@ async def test_read_uses_rendered_text_on_success(monkeypatch):
     inner = _FakeInnerGateway()
 
     async with BrowserAugmentedGateway(inner) as gateway:
-        record = await gateway.read("https://example.com/js-heavy")
+        records = await gateway.read("https://example.com/js-heavy")
 
+    assert len(records) == 1
+    record = records[0]
     assert record.source_kind == "page_content"
     assert record.title == "Rendered Title"
     assert record.raw_extract == "the real, JS-rendered page content"
@@ -144,10 +146,10 @@ async def test_read_falls_back_to_inner_on_render_error(monkeypatch):
     inner = _FakeInnerGateway()
 
     async with BrowserAugmentedGateway(inner) as gateway:
-        record = await gateway.read("https://example.com/broken")
+        records = await gateway.read("https://example.com/broken")
 
     assert inner.read_calls == ["https://example.com/broken"]
-    assert record is inner.fallback_record
+    assert records == [inner.fallback_record]
 
 
 @pytest.mark.asyncio
@@ -157,10 +159,10 @@ async def test_read_falls_back_to_inner_on_empty_render(monkeypatch):
     inner = _FakeInnerGateway()
 
     async with BrowserAugmentedGateway(inner) as gateway:
-        record = await gateway.read("https://example.com/empty")
+        records = await gateway.read("https://example.com/empty")
 
     assert inner.read_calls == ["https://example.com/empty"]
-    assert record is inner.fallback_record
+    assert records == [inner.fallback_record]
 
 
 @pytest.mark.asyncio

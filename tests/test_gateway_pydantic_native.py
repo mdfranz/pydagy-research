@@ -151,11 +151,12 @@ async def test_read_translates_agent_run_error_to_failed_record():
     gateway = _bare_gateway()
     gateway._fetch_agent = _RaisingAgent()
 
-    record = await gateway.read("https://example.com/page")
+    records = await gateway.read("https://example.com/page")
 
-    assert record.status == "failed"
-    assert record.source_kind == "page_content"
-    assert record.source_url == "https://example.com/page"
+    assert len(records) == 1
+    assert records[0].status == "failed"
+    assert records[0].source_kind == "page_content"
+    assert records[0].source_url == "https://example.com/page"
 
 
 class _EmptyAgent:
@@ -167,7 +168,8 @@ async def test_read_returns_failed_record_when_no_content_returned():
     gateway = _bare_gateway()
     gateway._fetch_agent = _EmptyAgent()
 
-    record = await gateway.read("https://example.com/empty")
+    records = await gateway.read("https://example.com/empty")
 
-    assert record.status == "failed"
-    assert record.error == "no content returned"
+    assert len(records) == 1
+    assert records[0].status == "failed"
+    assert records[0].error == "no content returned"

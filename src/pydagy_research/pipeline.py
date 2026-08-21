@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from .graph import PipelineDeps, PipelineState, build_graph, default_deps
-from .models import ResearchAnswer, RetrievalBackend
+from .models import ResearchAnswer, ResearchReport, RetrievalBackend
 
 __all__ = ["run_research"]
 
@@ -18,7 +18,7 @@ async def run_research(
     use_headless_browser: bool = False,
     enable_otel_tracing: bool = False,
     deps: PipelineDeps | None = None,
-) -> ResearchAnswer:
+) -> ResearchReport:
     """Runs the full research pipeline (PLAN.md §6) end-to-end for `question`.
 
     Args:
@@ -45,7 +45,9 @@ async def run_research(
             builds real Planner/Writer agents.
 
     Returns:
-        The validated, grounded `ResearchAnswer`.
+        A `ResearchReport` containing the validated, grounded answer plus
+        operational telemetry (MULTI-PROVIDER-PLAN.md §5): source attempt
+        records and validation summary showing what evidence was kept/dropped.
     """
     graph = build_graph()
     state = PipelineState(question=question, retrieval_backend=retrieval_backend)
@@ -56,4 +58,9 @@ async def run_research(
             model, use_headless_browser=use_headless_browser, enable_otel_tracing=enable_otel_tracing
         )
     )
-    return await graph.run(state=state, deps=resolved_deps)
+    answer = await graph.run(state=state, deps=resolved_deps)
+    return ResearchReport(
+        answer=answer,
+        source_attempts=state.source_attempts,
+        validation_summary=state.validation_summary,
+    )
