@@ -250,7 +250,12 @@ def build_graph() -> Graph[PipelineState, PipelineDeps, None, ResearchAnswer]:
 
 
 def default_deps(
-    model: Any, *, use_headless_browser: bool = False, enable_otel_tracing: bool = False
+    model: Any,
+    *,
+    use_headless_browser: bool = False,
+    enable_otel_tracing: bool = False,
+    multi_provider: list[str] | None = None,
+    model_map: dict[str, str] | None = None,
 ) -> PipelineDeps:
     """Convenience: build `PipelineDeps` with real Planner/Writer agents on `model`.
 
@@ -269,18 +274,30 @@ def default_deps(
     """
 
     def gateway_factory(plan: ResearchPlan, telemetry_recorder=None, **kwargs) -> RetrievalGateway:
-        # PydanticNativeSearchGateway wraps a pydantic_ai.Agent and, unlike
-        # AntigravitySDKGateway (which resolves its own model via
-        # LocalAgentConfig/ADC/env when none is given), has no default model
-        # to fall back to -- it needs the same `model` the Planner/Writer
-        # agents use. AntigravitySDKGateway's `model` kwarg is a *different*
-        # namespace (the Antigravity SDK's own model identifiers, not
-        # pydantic_ai's provider-prefixed ones), so it must NOT get `model`
-        # here -- pass nothing and let it resolve its own default.
-        if plan.retrieval_backend == "pydantic_native":
-            gateway = make_gateway(plan, model=model, telemetry_recorder=telemetry_recorder)
+        # Multi-provider mode: use MultiProviderGateway instead of single backend
+        if multi_provider and model_map:
+            from .multi_provider_factory import make_multi_provider_gateway
+
+            gateway = make_multi_provider_gateway(
+                plan, providers=multi_provider, model_map=model_map, telemetry_recorder=telemetry_recorder
+            )
         else:
-            gateway = make_gateway(plan, enable_otel=enable_otel_tracing, telemetry_recorder=telemetry_recorder)
+            # Single-provider mode (original behavior)
+            # PydanticNativeSearchGateway wraps a pydantic_ai.Agent and, unlike
+            # AntigravitySDKGateway (which resolves its own model via
+            # LocalAgentConfig/ADC/env when none is given), has no default model
+            # to fall back to -- it needs the same `model` the Planner/Writer
+            # agents use. AntigravitySDKGateway's `model` kwarg is a *different*
+            # namespace (the Antigravity SDK's own model identifiers, not
+            # pydantic_ai's provider-prefixed ones), so it must NOT get `model`
+            # here -- pass nothing and let it resolve its own default.
+            if plan.retrieval_backend == "pydantic_native":
+                gateway = make_gateway(plan, model=model, telemetry_recorder=telemetry_recorder)
+            else:
+                gateway = make_gateway(
+                    plan, enable_otel=enable_otel_tracing, telemetry_recorder=telemetry_recorder
+                )
+
         if use_headless_browser:
             from .browser_gateway import BrowserAugmentedGateway
 

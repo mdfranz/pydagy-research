@@ -17,32 +17,29 @@ async def run_research(
     retrieval_backend: RetrievalBackend = "antigravity",
     use_headless_browser: bool = False,
     enable_otel_tracing: bool = False,
+    multi_provider: list[str] | None = None,
+    model_map: dict[str, str] | None = None,
     deps: PipelineDeps | None = None,
 ) -> ResearchReport:
     """Runs the full research pipeline (PLAN.md §6) end-to-end for `question`.
 
     Args:
         question: The user's research question.
-        model: The `pydantic_ai` model used for both the Planner and Writer
-            agents (e.g. `"google-gla:gemini-2.5-flash"`, or a `TestModel`
-            for deterministic tests). Ignored if `deps` is supplied.
-        retrieval_backend: Which `RetrievalGateway` backend to use — the
-            default Antigravity SDK gateway, or the `pydantic_native`
-            `WebSearch`/`WebFetch` gateway (PLAN.md §1).
-        use_headless_browser: Wrap the selected backend with
-            `BrowserAugmentedGateway` (see browser_gateway.py) so `.read()`
-            renders JavaScript-heavy pages with real Chromium instead of a
-            static HTML fetch. Requires the `browser` extra. Ignored if
-            `deps` is supplied.
-        enable_otel_tracing: Instrument the Antigravity backend's own
-            session/tool-call lifecycle with its built-in OTel hooks (see
-            tracing.py) — pass `configure_tracing()`'s return value here to
-            trace it whenever `LOGFIRE_TOKEN` is set. Ignored if `deps` is
-            supplied.
-        deps: Pre-built `PipelineDeps` (agents + gateway factory), for tests
-            that need full control over every collaborator. When omitted,
-            `default_deps(model, use_headless_browser=..., enable_otel_tracing=...)`
-            builds real Planner/Writer agents.
+        model: The `pydantic_ai` model used for Planner/Writer agents when not
+            in multi-provider mode. Ignored if `deps` or `multi_provider` supplied.
+        retrieval_backend: Which single-provider backend to use (PLAN.md §1).
+            Ignored if `multi_provider` supplied. Default: "antigravity".
+        use_headless_browser: Wrap backend with `BrowserAugmentedGateway` for
+            JavaScript rendering. Requires `browser` extra. Ignored if `deps` supplied.
+        enable_otel_tracing: Enable Logfire/OTel tracing (see tracing.py).
+            Pass `configure_tracing()`'s return value. Ignored if `deps` supplied.
+        multi_provider: List of provider names to run in parallel
+            (e.g., ["gemini", "anthropic"]). When set, uses
+            `MultiProviderGateway` instead of single backend. Requires `model_map`.
+        model_map: {provider_name: model_id, ...} mapping when using `multi_provider`.
+            e.g., {"gemini": "google:gemini-3.7-flash", "anthropic": "anthropic:claude-opus-5"}
+        deps: Pre-built `PipelineDeps` for tests needing full control.
+            When omitted, `default_deps()` builds real agents and gateway.
 
     Returns:
         A `ResearchReport` containing the validated, grounded answer plus
@@ -55,7 +52,11 @@ async def run_research(
         deps
         if deps is not None
         else default_deps(
-            model, use_headless_browser=use_headless_browser, enable_otel_tracing=enable_otel_tracing
+            model,
+            use_headless_browser=use_headless_browser,
+            enable_otel_tracing=enable_otel_tracing,
+            multi_provider=multi_provider,
+            model_map=model_map,
         )
     )
     answer = await graph.run(state=state, deps=resolved_deps)

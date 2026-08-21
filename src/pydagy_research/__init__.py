@@ -99,9 +99,45 @@ def main() -> None:
     parser.add_argument(
         "--model",
         default="google:gemini-3.7-flash",
-        help="pydantic_ai model id for the Planner/Writer agents.",
+        help="pydantic_ai model id for the Planner/Writer agents (single-provider mode).",
+    )
+    parser.add_argument(
+        "--multi-provider",
+        metavar="PROVIDERS",
+        help=(
+            "Comma-separated list of providers for multi-provider mode "
+            "(e.g., 'gemini,anthropic'). Overrides --backend and --model. "
+            "Requires --model-map."
+        ),
+    )
+    parser.add_argument(
+        "--model-map",
+        metavar="PROVIDER=MODEL_ID",
+        action="append",
+        help=(
+            "Model mapping for multi-provider mode. "
+            "Use multiple times: --model-map gemini=google:gemini-3.7-flash "
+            "--model-map anthropic=anthropic:claude-opus-5"
+        ),
     )
     args = parser.parse_args()
+
+    # Parse multi-provider arguments
+    multi_provider = None
+    model_map = None
+    if args.multi_provider:
+        multi_provider = [p.strip() for p in args.multi_provider.split(",")]
+        if args.model_map:
+            model_map = {}
+            for mapping in args.model_map:
+                provider, model_id = mapping.split("=", 1)
+                model_map[provider.strip()] = model_id.strip()
+        else:
+            print(
+                "Error: --model-map is required when using --multi-provider",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
     log_path = configure_file_logging()
     print(f"(logging to {log_path})", file=sys.stderr)
@@ -118,6 +154,8 @@ def main() -> None:
             retrieval_backend=args.backend,
             use_headless_browser=args.browser,
             enable_otel_tracing=tracing_enabled,
+            multi_provider=multi_provider,
+            model_map=model_map,
         )
     )
     print(report.model_dump_json(indent=2))
