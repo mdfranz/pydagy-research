@@ -48,6 +48,7 @@ class PipelineState:
     plan: ResearchPlan | None = None
     raw_evidence: list[EvidenceRecord] = field(default_factory=list)
     evidence_pool: dict[str, EvidenceRecord] = field(default_factory=dict)
+    dropped_records: list[tuple[EvidenceRecord, str]] = field(default_factory=list)
     write_attempts: int = 0
     validation_errors: list[str] = field(default_factory=list)
     source_attempts: list = field(default_factory=list)
@@ -137,9 +138,11 @@ class ValidatorNode(BaseNode[PipelineState, PipelineDeps]):
         for record in ctx.state.raw_evidence:
             if record.status != "success":
                 dropped_failed += 1
+                ctx.state.dropped_records.append((record, "failed"))
                 continue
             if record.drift_flagged:
                 dropped_drift += 1
+                ctx.state.dropped_records.append((record, "drift"))
                 continue
 
             normalized_url = record.source_url.strip().lower()
@@ -149,6 +152,7 @@ class ValidatorNode(BaseNode[PipelineState, PipelineDeps]):
             dedup_key = (normalized_url, record.provider)
             if dedup_key in seen_keys:
                 dropped_duplicate += 1
+                ctx.state.dropped_records.append((record, "duplicate"))
                 continue
             seen_keys.add(dedup_key)
 

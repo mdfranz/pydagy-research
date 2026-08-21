@@ -60,8 +60,13 @@ async def run_research(
         )
     )
     answer = await graph.run(state=state, deps=resolved_deps)
+    # Convert dropped records to serializable format
+    dropped_records_data = [
+        (record.model_dump(), reason) for record, reason in state.dropped_records
+    ]
     return ResearchReport(
         answer=answer,
         source_attempts=state.source_attempts,
         validation_summary=state.validation_summary,
+        dropped_records=dropped_records_data,
     )

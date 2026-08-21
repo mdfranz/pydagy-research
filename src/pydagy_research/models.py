@@ -144,6 +144,7 @@ class ResearchReport(BaseModel):
     answer: ResearchAnswer
     source_attempts: list = Field(default_factory=list)
     validation_summary: dict | None = None
+    dropped_records: list[tuple[dict, str]] = Field(default_factory=list)
 
 
 def validate_research_answer(

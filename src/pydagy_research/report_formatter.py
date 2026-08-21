@@ -81,4 +81,28 @@ def _format_markdown(report: ResearchReport) -> str:
             )
         lines.append("")
 
+    # Dropped records (if present)
+    if report.dropped_records:
+        lines.append("## Dropped Records (Not Used)\n")
+        by_reason = {}
+        for record_data, reason in report.dropped_records:
+            if reason not in by_reason:
+                by_reason[reason] = []
+            by_reason[reason].append(record_data)
+
+        for reason, records in sorted(by_reason.items()):
+            reason_label = (
+                "Failed" if reason == "failed"
+                else "Drift-flagged" if reason == "drift"
+                else "Duplicates" if reason == "duplicate"
+                else reason.title()
+            )
+            lines.append(f"### {reason_label} ({len(records)})\n")
+            for record in records:
+                url = record.get("source_url", "unknown")
+                error = record.get("error", "")
+                error_note = f" — {error}" if error else ""
+                lines.append(f"- {url}{error_note}")
+            lines.append("")
+
     return "\n".join(lines)
