@@ -115,9 +115,9 @@ def main() -> None:
         metavar="PROVIDER=MODEL_ID",
         action="append",
         help=(
-            "Model mapping for multi-provider mode. "
-            "Use multiple times: --model-map gemini=google:gemini-3.7-flash "
-            "--model-map anthropic=anthropic:claude-opus-5"
+            "Override model mapping for multi-provider mode (optional). "
+            "Defaults: gemini=google:gemini-3.7-flash, anthropic=anthropic:claude-haiku-4-5. "
+            "Use multiple times to override: --model-map gemini=google:gemini-2.0-flash"
         ),
     )
     parser.add_argument(
@@ -133,17 +133,16 @@ def main() -> None:
     model_map = None
     if args.multi_provider:
         multi_provider = [p.strip() for p in args.multi_provider.split(",")]
+        # Default model mappings
+        model_map = {
+            "gemini": "google:gemini-3.7-flash",
+            "anthropic": "anthropic:claude-haiku-4-5",
+        }
+        # Override with user-provided mappings if any
         if args.model_map:
-            model_map = {}
             for mapping in args.model_map:
                 provider, model_id = mapping.split("=", 1)
                 model_map[provider.strip()] = model_id.strip()
-        else:
-            print(
-                "Error: --model-map is required when using --multi-provider",
-                file=sys.stderr,
-            )
-            sys.exit(1)
 
     log_path = configure_file_logging()
     print(f"(logging to {log_path})", file=sys.stderr)
