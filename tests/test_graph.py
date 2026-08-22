@@ -163,6 +163,41 @@ async def test_pipeline_degrades_gracefully_when_writer_cannot_ground(evidence):
     assert state.write_attempts == 2
 
 
+async def test_fixed_plan_bypasses_planner_agent(evidence):
+    _, page_record = evidence
+    fixed_plan = ResearchPlan(
+        question="fixed question",
+        requests=[SearchOrFetchRequest(request_id="r1", action="read", query_or_url=page_record.source_url)],
+    )
+
+    class _PlannerMustNotRun:
+        async def run(self, prompt):
+            raise AssertionError("planner should be bypassed for a fixed plan")
+
+    def gateway_factory(plan, telemetry_recorder=None, **kwargs):
+        return _FakeGateway(search_records=[], read_record=page_record)
+
+    writer_model = TestModel(custom_output_args={
+        "answer": "Paris is France's capital.",
+        "claims": [{"claim_text": "Paris is France's capital.", "evidence_ids": ["EVID-001"]}],
+        "citations": [{"evidence_id": "EVID-001", "source_url": page_record.source_url, "snippet": "Paris"}],
+        "limitations": [],
+    })
+    state = PipelineState(question=fixed_plan.question, retrieval_backend="pydantic_native")
+    deps = PipelineDeps(
+        planner_agent=_PlannerMustNotRun(),
+        writer_agent=build_writer_agent(writer_model),
+        gateway_factory=gateway_factory,
+        fixed_plan=fixed_plan,
+    )
+
+    result = await build_graph().run(state=state, deps=deps)
+
+    assert result.claims[0].evidence_ids == ["EVID-001"]
+    assert state.plan is not None
+    assert state.plan.requests == fixed_plan.requests
+
+
 async def test_validator_node_deduplicates_and_drops_failed_and_drift_records():
     from pydagy_research.graph import ValidatorNode
     from pydantic_graph import GraphRunContext
@@ -209,6 +244,34 @@ async def test_validator_node_deduplicates_and_drops_failed_and_drift_records():
     assert next_node.__class__.__name__ == "WriterNode"
     assert list(state.evidence_pool.keys()) == ["EVID-001"]
     assert state.evidence_pool["EVID-001"].source_url == good.source_url
+    assert state.validation_summary == {
+        "raw_count": 4,
+        "kept_count": 1,
+        "dropped_failed": 1,
+        "dropped_drift": 1,
+        "dropped_duplicate": 1,
+    }
+
+
+def test_default_deps_populates_telemetry_experiment_context():
+    deps = default_deps(
+        "google:gemini-3.7-flash",
+        use_headless_browser=True,
+        multi_provider=["gemini", "anthropic"],
+        model_map={
+            "gemini": "google:gemini-3.7-flash",
+            "anthropic": "anthropic:claude-opus-5",
+        },
+    )
+
+    assert deps.telemetry_experiment is not None
+    assert deps.telemetry_experiment.scenario == "multi_provider"
+    assert deps.telemetry_experiment.configured_backends == ["pydantic_native"]
+    assert deps.telemetry_experiment.configured_models == [
+        "google:gemini-3.7-flash",
+        "anthropic:claude-opus-5",
+    ]
+    assert deps.telemetry_experiment.browser_enabled is True
 
 
 def test_default_deps_gateway_factory_threads_model_into_pydantic_native_only():

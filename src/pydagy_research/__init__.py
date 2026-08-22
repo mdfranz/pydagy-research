@@ -15,8 +15,17 @@ from .models import (
     validate_research_answer,
 )
 from .pipeline import run_research
+from .experiments import (
+    EndToEndExperimentRun,
+    EndToEndFixedPlanExperiment,
+    ExperimentRun,
+    FixedPlanExperiment,
+    run_end_to_end_fixed_plan_experiment,
+    run_fixed_plan_experiment,
+)
 from .telemetry import (
     ExperimentContext,
+    EvidenceLinkTelemetry,
     RetrievalRequestTelemetry,
     SourceAttempt,
     TelemetryEmitter,
@@ -44,7 +53,14 @@ __all__ = [
     "SearchOrFetchRequest",
     "validate_research_answer",
     "run_research",
+    "ExperimentRun",
+    "FixedPlanExperiment",
+    "run_fixed_plan_experiment",
+    "EndToEndExperimentRun",
+    "EndToEndFixedPlanExperiment",
+    "run_end_to_end_fixed_plan_experiment",
     "ExperimentContext",
+    "EvidenceLinkTelemetry",
     "RetrievalRequestTelemetry",
     "SourceAttempt",
     "TelemetryEmitter",

@@ -23,6 +23,7 @@ __all__ = [
     "ExperimentContext",
     "RetrievalRequestTelemetry",
     "SourceAttempt",
+    "EvidenceLinkTelemetry",
     "ValidationSummary",
     "TelemetryEmitter",
     "TelemetryRecorder",
@@ -160,6 +161,21 @@ class ValidationSummary(BaseModel):
         }
 
 
+class EvidenceLinkTelemetry(BaseModel):
+    """Link a completed retrieval attempt to the stable validator evidence id."""
+
+    request_id: str
+    provider: str
+    evidence_id: str
+
+    def span_attributes(self) -> dict[str, str]:
+        return {
+            "retrieval.request.id": self.request_id,
+            "retrieval.provider": self.provider,
+            "retrieval.evidence_id": self.evidence_id,
+        }
+
+
 class SpanFactory(Protocol):
     """Subset of ``logfire.span`` used by ``TelemetryEmitter``."""
 
@@ -201,6 +217,7 @@ class TelemetryRecorder:
         self.emitter = emitter or TelemetryEmitter()
         self.attempts: list[SourceAttempt] = []
         self.validation_summaries: list[ValidationSummary] = []
+        self.evidence_links: list[EvidenceLinkTelemetry] = []
 
     @contextmanager
     def request_span(self, request: RetrievalRequestTelemetry) -> Iterator[Any | None]:
@@ -221,6 +238,13 @@ class TelemetryRecorder:
         self.validation_summaries.append(summary)
         attributes = self.experiment.span_attributes() | summary.span_attributes()
         with self.emitter.span("research evidence validation", **attributes):
+            pass
+
+    def record_evidence_link(self, link: EvidenceLinkTelemetry) -> None:
+        """Emit the validator-assigned evidence id for one successful attempt."""
+        self.evidence_links.append(link)
+        attributes = self.experiment.span_attributes() | link.span_attributes()
+        with self.emitter.span("research evidence linked", **attributes):
             pass
 
 

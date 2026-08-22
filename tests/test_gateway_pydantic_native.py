@@ -12,6 +12,7 @@ import pytest
 from pydantic_ai.exceptions import UnexpectedModelBehavior
 
 from pydagy_research.gateway import PydanticNativeSearchGateway, _extract_native_evidence
+from pydagy_research.telemetry import TelemetryRecorder
 
 
 def _bare_gateway() -> PydanticNativeSearchGateway:
@@ -173,3 +174,16 @@ async def test_read_returns_failed_record_when_no_content_returned():
     assert len(records) == 1
     assert records[0].status == "failed"
     assert records[0].error == "no content returned"
+
+
+def test_attempt_telemetry_uses_configured_provider_name():
+    gateway = _bare_gateway()
+    gateway._model = "anthropic:claude-haiku-4-5"
+    gateway._telemetry_provider = "anthropic"
+    gateway._telemetry_recorder = TelemetryRecorder()
+
+    gateway._record_attempt_telemetry(
+        "search", "Python overview", status="success", tier="verified", char_count=100
+    )
+
+    assert gateway._telemetry_recorder.attempts[0].provider == "anthropic"

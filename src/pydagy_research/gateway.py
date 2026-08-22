@@ -492,12 +492,14 @@ class PydanticNativeSearchGateway:
         search_kwargs: dict[str, Any] | None = None,
         fetch_kwargs: dict[str, Any] | None = None,
         telemetry_recorder: "TelemetryRecorder | None" = None,
+        telemetry_provider: str = "pydantic_native",
     ) -> None:
         from pydantic_ai import Agent as PydanticAgent
         from pydantic_ai.capabilities import WebFetch, WebSearch
 
         self._model = model
         self._telemetry_recorder = telemetry_recorder
+        self._telemetry_provider = telemetry_provider
         self._search_agent: Any = PydanticAgent(
             model, name="native_search_agent", capabilities=[WebSearch(**(search_kwargs or {}))]
         )
@@ -622,7 +624,7 @@ class PydanticNativeSearchGateway:
 
         attempt = SourceAttempt(
             request_id=f"pn-{uuid.uuid4().hex[:8]}",
-            provider="pydantic_native",
+            provider=getattr(self, "_telemetry_provider", "pydantic_native"),
             action=action,
             query_or_url=query_or_url,
             tier=tier,

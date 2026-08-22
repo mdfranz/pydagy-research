@@ -11,6 +11,7 @@ makes the "deterministic evidence grounding" claim in PLAN.md's Summary hold.
 from __future__ import annotations
 
 import logging
+from hashlib import sha256
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -20,7 +21,7 @@ from pydantic_graph import BaseNode, End, Graph, GraphBuilder, GraphRunContext, 
 from .agents import WriterDeps, build_planner_agent, build_writer_agent, planner_prompt, writer_prompt
 from .gateway import RetrievalGateway, make_gateway, run_plan
 from .models import EvidenceRecord, ResearchAnswer, ResearchPlan, RetrievalBackend
-from .telemetry import TelemetryRecorder
+from .telemetry import EvidenceLinkTelemetry, ExperimentContext, TelemetryRecorder, ValidationSummary
 
 __all__ = [
     "PipelineState",
@@ -53,6 +54,7 @@ class PipelineState:
     validation_errors: list[str] = field(default_factory=list)
     source_attempts: list = field(default_factory=list)
     validation_summary: dict | None = None
+    telemetry_recorder: TelemetryRecorder | None = None
 
 
 @dataclass
@@ -73,6 +75,8 @@ class PipelineDeps:
     gateway_factory: Callable[[ResearchPlan], RetrievalGateway] = make_gateway
     max_write_attempts: int = 2
     enable_telemetry_emission: bool = False
+    telemetry_experiment: ExperimentContext | None = None
+    fixed_plan: ResearchPlan | None = None
 
 
 @dataclass
@@ -80,8 +84,11 @@ class PlannerNode(BaseNode[PipelineState, PipelineDeps]):
     """1. Planner Node (PLAN.md §6.1): generates the bounded `ResearchPlan`."""
 
     async def run(self, ctx: GraphRunContext[PipelineState, PipelineDeps]) -> "RetrievalNode":
-        result = await ctx.deps.planner_agent.run(planner_prompt(ctx.state.question))
-        plan: ResearchPlan = result.output
+        if ctx.deps.fixed_plan is not None:
+            plan = ctx.deps.fixed_plan
+        else:
+            result = await ctx.deps.planner_agent.run(planner_prompt(ctx.state.question))
+            plan = result.output
         # The host, not the model, controls which retrieval backend runs
         # (PLAN.md §1: "a config toggle, not a one-way architectural door").
         ctx.state.plan = plan.model_copy(update={"retrieval_backend": ctx.state.retrieval_backend})
@@ -104,7 +111,12 @@ class RetrievalNode(BaseNode[PipelineState, PipelineDeps]):
         from .telemetry import TelemetryEmitter
 
         emitter = TelemetryEmitter(enabled=ctx.deps.enable_telemetry_emission)
-        recorder = TelemetryRecorder(emitter=emitter)
+        experiment = (ctx.deps.telemetry_experiment or ExperimentContext()).model_copy(
+            update={
+                "plan_hash": sha256(ctx.state.plan.model_dump_json().encode()).hexdigest(),
+            }
+        )
+        recorder = TelemetryRecorder(experiment=experiment, emitter=emitter)
 
         # Pass recorder to gateway factory so it can emit attempt spans
         gateway = ctx.deps.gateway_factory(ctx.state.plan, telemetry_recorder=recorder)
@@ -113,6 +125,7 @@ class RetrievalNode(BaseNode[PipelineState, PipelineDeps]):
 
         # Carry attempts through pipeline state for ResearchReport
         ctx.state.source_attempts = recorder.attempts
+        ctx.state.telemetry_recorder = recorder
         return ValidatorNode()
 
 
@@ -161,6 +174,28 @@ class ValidatorNode(BaseNode[PipelineState, PipelineDeps]):
             pool[stable_id] = record.model_copy(update={"evidence_id": stable_id})
 
         ctx.state.evidence_pool = pool
+
+        if ctx.state.telemetry_recorder is not None:
+            for evidence_id, record in pool.items():
+                for attempt in ctx.state.source_attempts:
+                    if (
+                        attempt.evidence_id is None
+                        and attempt.status == "success"
+                        and attempt.provider == record.provider
+                        and (
+                            (attempt.action == "read" and record.source_kind == "page_content")
+                            or (attempt.action == "search" and record.source_kind == "search_summary")
+                        )
+                    ):
+                        attempt.evidence_id = evidence_id
+                        ctx.state.telemetry_recorder.record_evidence_link(
+                            EvidenceLinkTelemetry(
+                                request_id=attempt.request_id,
+                                provider=attempt.provider,
+                                evidence_id=evidence_id,
+                            )
+                        )
+                        break
         ctx.state.validation_summary = {
             "raw_count": len(ctx.state.raw_evidence),
             "kept_count": len(pool),
@@ -168,6 +203,11 @@ class ValidatorNode(BaseNode[PipelineState, PipelineDeps]):
             "dropped_drift": dropped_drift,
             "dropped_duplicate": dropped_duplicate,
         }
+
+        if ctx.state.telemetry_recorder is not None:
+            ctx.state.telemetry_recorder.record_validation(
+                ValidationSummary(**ctx.state.validation_summary)
+            )
 
         # Emit validation summary to telemetry if available
         # (TelemetryRecorder is passed to gateways, so we check if we have access via the evidence pool)
@@ -260,6 +300,8 @@ def default_deps(
     enable_otel_tracing: bool = False,
     multi_provider: list[str] | None = None,
     model_map: dict[str, str] | None = None,
+    fixed_plan: ResearchPlan | None = None,
+    telemetry_experiment: ExperimentContext | None = None,
 ) -> PipelineDeps:
     """Convenience: build `PipelineDeps` with real Planner/Writer agents on `model`.
 
@@ -308,9 +350,17 @@ def default_deps(
             gateway = BrowserAugmentedGateway(gateway, telemetry_recorder=telemetry_recorder)
         return gateway
 
+    configured_models = list(model_map.values()) if model_map else ([str(model)] if model is not None else [])
     return PipelineDeps(
         planner_agent=build_planner_agent(model),
         writer_agent=build_writer_agent(model),
         gateway_factory=gateway_factory,
         enable_telemetry_emission=enable_otel_tracing,
+        telemetry_experiment=telemetry_experiment or ExperimentContext(
+            scenario="multi_provider" if multi_provider else "single_provider",
+            configured_backends=["pydantic_native"] if multi_provider else [],
+            configured_models=configured_models,
+            browser_enabled=use_headless_browser,
+        ),
+        fixed_plan=fixed_plan,
     )

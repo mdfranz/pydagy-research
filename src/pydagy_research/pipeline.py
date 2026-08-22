@@ -6,6 +6,8 @@ from typing import Any
 
 from .graph import PipelineDeps, PipelineState, build_graph, default_deps
 from .models import ResearchAnswer, ResearchReport, RetrievalBackend
+from .models import ResearchPlan
+from .telemetry import ExperimentContext
 
 __all__ = ["run_research"]
 
@@ -19,6 +21,8 @@ async def run_research(
     enable_otel_tracing: bool = False,
     multi_provider: list[str] | None = None,
     model_map: dict[str, str] | None = None,
+    fixed_plan: ResearchPlan | None = None,
+    telemetry_experiment: ExperimentContext | None = None,
     deps: PipelineDeps | None = None,
 ) -> ResearchReport:
     """Runs the full research pipeline (PLAN.md §6) end-to-end for `question`.
@@ -57,6 +61,8 @@ async def run_research(
             enable_otel_tracing=enable_otel_tracing,
             multi_provider=multi_provider,
             model_map=model_map,
+            fixed_plan=fixed_plan,
+            telemetry_experiment=telemetry_experiment,
         )
     )
     answer = await graph.run(state=state, deps=resolved_deps)

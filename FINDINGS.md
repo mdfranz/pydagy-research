@@ -362,3 +362,93 @@ explicable structural difference in turn count.
   runs. Worth checking whether the Writer prompt should more strongly
   require exhaustively enumerating a page's evidence rather than
   summarizing a subset, independent of the backend question entirely.
+
+---
+
+## 6. Fixed-plan Gemini / Anthropic retrieval comparison (2026-08-22)
+
+The first controlled multi-provider experiments used a new fixed-plan harness
+(`experiments.run_fixed_plan_experiment`). The Planner was deliberately not
+run: Gemini and Anthropic each received the identical `ResearchPlan`, first
+individually and then through `MultiProviderGateway` fan-out. This isolates
+retrieval behavior from planner nondeterminism. Logfire carries the shared
+experiment id and plan hash plus a distinct scenario for each baseline and
+fan-out run.
+
+### 6.1 Results so far
+
+| Fixed plan | Gemini, individual | Anthropic, individual | Fan-out result |
+| --- | --- | --- | --- |
+| Python.org overview: one scoped search + `python.org/about` read | search: 1,834 chars / 20.3s; read: 2,020 / 2.4s | search: 15,389 / 6.2s; read: 15,848 / 6.8s | all four attempts succeeded; search tail 6.0s, read tail 7.6s |
+| Official Rust + Python reads | Rust: 5,363 / 4.4s; Python: 2,100 / 4.7s | Rust: 11,177 / 6.1s; Python: 15,848 / 6.6s | all four attempts succeeded; Rust tail 5.6s, Python tail 5.9s |
+
+The first run is `provider-comparison-python-about-v3`; the second is
+`provider-comparison-rust-python-v1` in Logfire. An earlier pilot
+(`provider-comparison-python-about-v2`) recorded a Gemini search failure
+after output retries while Anthropic search and both reads succeeded. This
+is useful resilience evidence but is excluded from the clean baseline table
+above.
+
+### 6.2 What this supports—and does not yet support
+
+**Supported:** Anthropic returned roughly 2–8x more extracted text on these
+official pages. Gemini was usually faster for individual reads. With
+sequential logical requests, fan-out wall time follows the slower provider
+for each request (rather than the sum of providers), and retains both
+successful extracts. The pilot demonstrates that one provider's failed
+attempt does not prevent another provider's evidence from surviving.
+
+**Not yet established:** these fixed reads intentionally use the same URLs,
+so they cannot prove search-index independence or unique source discovery.
+Nor do character counts prove that the additional Anthropic text leads to
+more valid Writer citations. We still need at least one search-led plan and
+an end-to-end validation/Writer comparison before deciding whether the
+additional provider cost is justified.
+
+### 6.3 Telemetry correction discovered by the experiment
+
+The first pilot's native attempt spans said `retrieval.provider=pydantic_native`,
+even though its retained records were tagged `gemini` and `anthropic`. This
+made provider metrics unusable. The factory now passes the configured
+provider name through to `PydanticNativeSearchGateway`; the v3 and Rust/Python
+runs correctly record `retrieval.provider=gemini|anthropic` on every attempt.
+
+---
+
+## 7. First fixed-plan end-to-end citation comparison (2026-08-22)
+
+Scenario `provider-e2e-natalie-harp-v1` held the plan and Writer model
+(`google:gemini-3.7-flash`) constant while comparing Gemini retrieval,
+Anthropic retrieval, and fan-out. The time-bounded question asked whether
+publicly documented facts establish Natalie Harp as a U.S. national-security
+threat, explicitly requiring risk indicators, mitigating facts, uncertainty,
+and no inference of malicious intent beyond the sources.
+
+The plan read an official White House staff report, a Guardian report about
+the security-clearance questions and White House response, and a CNN
+transcript. The completed fan-out trace took 51.9 seconds, retained all six
+provider records, and emitted six `research evidence linked` spans.
+
+The Writer produced five grounded claims and four citations. Its conclusion
+was appropriately bounded: the public reporting documents a potential access
+and vetting risk, but the available sources do not document intentional
+wrongdoing, espionage, or an official determination that Harp is a national-
+security threat.
+
+Most importantly for the multi-provider decision, every cited fan-out record
+came from Gemini:
+
+- `EVID-004` (Gemini): Guardian security-clearance reporting and response;
+- `EVID-006` (Gemini): CNN transcript discussing the public concerns.
+
+Anthropic produced and retained `EVID-001`, `EVID-003`, and `EVID-005`, but
+the fixed Gemini Writer cited none of them. In this scenario, adding Anthropic
+doubled the retained evidence pool without adding a cited claim. This is one
+negative data point for default fan-out—not a final rejection, but exactly the
+kind of result the plan's decision gate requires.
+
+The run also exposed content-quality issues that raw/kept counts do not show:
+the official PDF could be retained as unreadable binary, and provider fetches
+could return permission-error prose as a nominally successful record. The
+Validator therefore still needs content-aware exclusion rules before
+`kept_count` can be treated as a quality metric.

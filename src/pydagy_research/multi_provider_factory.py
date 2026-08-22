@@ -54,7 +54,12 @@ def make_multi_provider_gateway(
         # Each provider uses pydantic_native backend
         plan_for_provider = plan.model_copy(update={"retrieval_backend": "pydantic_native"})
 
-        gw = make_gateway(plan_for_provider, model=model_id, **kwargs)
+        gw = make_gateway(
+            plan_for_provider,
+            model=model_id,
+            telemetry_provider=provider,
+            **kwargs,
+        )
         gateways[provider] = gw
 
     # OpenAI can't do WebFetch, so mark it as not read-capable if present

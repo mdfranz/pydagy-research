@@ -8,6 +8,7 @@ import pytest
 from pydantic import ValidationError
 
 from pydagy_research.telemetry import (
+    EvidenceLinkTelemetry,
     ExperimentContext,
     RetrievalRequestTelemetry,
     SourceAttempt,
@@ -120,3 +121,10 @@ def test_recorder_emits_queryable_experiment_request_attempt_and_validation_attr
     validation_name, validation_attributes = calls[2]
     assert validation_name == "research evidence validation"
     assert validation_attributes["retrieval.validation.dropped_duplicate"] == 1
+
+    recorder.record_evidence_link(
+        EvidenceLinkTelemetry(request_id="req-1", provider="gemini", evidence_id="EVID-001")
+    )
+    link_name, link_attributes = calls[3]
+    assert link_name == "research evidence linked"
+    assert link_attributes["retrieval.evidence_id"] == "EVID-001"
